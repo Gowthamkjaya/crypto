@@ -1,3 +1,7 @@
+"""
+GitHub-compatible crypto data collector using CoinGlass API
+CoinGlass aggregates data from multiple exchanges without geo-blocking
+"""
 import asyncio
 import ccxt.async_support as ccxt
 import pandas as pd
@@ -7,195 +11,145 @@ import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import aiohttp
-import sys
 
 # --- CONFIGURATION ---
 SHEET_NAME = "crypto_history" 
 TOP_N = 100            
-DEEP_SCAN_LIMIT = 25   
+DEEP_SCAN_LIMIT = 25
 
-# Enhanced headers to avoid detection
+# CoinGlass API (Free tier: 100 calls/day)
+COINGLASS_API_KEY = os.environ.get('COINGLASS_API_KEY', '')  # Optional: better rates with API key
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept": "application/json",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive"
+    "coinglassSecret": COINGLASS_API_KEY  # Only used if API key is set
 }
 
-# Meme coins with 1000 prefix
-THOUSAND_COINS = {'PEPE', 'BONK', 'FLOKI', 'SHIB', 'LUNC', 'XEC', 'SATS', 'RATS'}
-
-# --- DEBUG MODE ---
-DEBUG = True  # Set to False to reduce logs
-
-def debug_print(msg):
-    """Print debug messages"""
-    if DEBUG:
-        print(f"[DEBUG] {msg}")
-        sys.stdout.flush()
-
 # --- 1. SYMBOL MAPPER ---
-def map_symbol(kraken_symbol):
-    """Convert Kraken symbol to Binance/Bybit format"""
+def map_symbol_to_coinglass(kraken_symbol):
+    """Convert Kraken symbol to CoinGlass format"""
     try:
         base = kraken_symbol.split('/')[0]
         if base == 'XBT': base = 'BTC'
         if base == 'XDG': base = 'DOGE'
         
-        # Handle 1000-prefix coins
-        if base.upper() in THOUSAND_COINS:
-            return f"1000{base}USDT", f"{base}USDT"
-        
-        return f"{base}USDT", None
-    except Exception as e:
-        debug_print(f"Symbol mapping error for {kraken_symbol}: {e}")
-        return None, None
+        # CoinGlass uses uppercase symbols
+        return base.upper()
+    except:
+        return None
 
-# --- 2. FETCH METRICS (WITH DETAILED LOGGING) ---
-async def fetch_binance_cvd(session, symbol):
-    """Fetch CVD from Binance with enhanced error handling"""
-    url = "https://fapi.binance.com/futures/data/takerlongshortRatio"
-    params = {'symbol': symbol, 'period': '4h', 'limit': 1}
-    
-    try:
-        debug_print(f"Fetching CVD for {symbol}...")
-        async with session.get(url, params=params, headers=HEADERS, timeout=15) as resp:
-            status = resp.status
-            debug_print(f"  Binance CVD response status: {status}")
-            
-            if status == 200:
-                data = await resp.json()
-                debug_print(f"  Binance CVD data: {data}")
-                
-                if data and isinstance(data, list) and len(data) > 0:
-                    buy = float(data[0].get('buyVol', 0))
-                    sell = float(data[0].get('sellVol', 0))
-                    cvd = round(buy - sell, 0)
-                    debug_print(f"  ✅ CVD calculated: {cvd} (buy={buy}, sell={sell})")
-                    return cvd
-                else:
-                    debug_print(f"  ⚠️ Empty or invalid data structure")
-            elif status == 400:
-                text = await resp.text()
-                debug_print(f"  ❌ Bad request (400): {text}")
-            elif status == 429:
-                debug_print(f"  ⚠️ Rate limited (429)")
-            else:
-                text = await resp.text()
-                debug_print(f"  ❌ Error {status}: {text}")
-    except asyncio.TimeoutError:
-        debug_print(f"  ⏱️ Timeout fetching CVD for {symbol}")
-    except Exception as e:
-        debug_print(f"  ❌ Exception fetching CVD: {type(e).__name__}: {e}")
-    
-    return 0
-
-async def fetch_bybit_metrics(session, symbol):
-    """Fetch L/S Ratio and Activity from Bybit with enhanced error handling"""
+# --- 2. FETCH FROM COINGLASS ---
+async def fetch_coinglass_metrics(session, symbol):
+    """
+    Fetch L/S Ratio, OI, and Liquidations from CoinGlass
+    CoinGlass aggregates data from Binance, Bybit, OKX, etc.
+    """
     ls_ratio = 0.0
-    activity = 0.0
+    liquidations_24h = 0.0
+    global_oi = 0.0
     
-    # L/S Ratio endpoint
-    ls_url = "https://api.bybit.com/v5/market/account-ratio"
-    ls_params = {'category': 'linear', 'symbol': symbol, 'period': '4h', 'limit': 1}
-    
-    # Activity endpoint
-    tick_url = "https://api.bybit.com/v5/market/tickers"
-    tick_params = {'category': 'linear', 'symbol': symbol}
+    # CoinGlass endpoints
+    base_url = "https://open-api.coinglass.com/public/v2"
     
     try:
-        debug_print(f"Fetching L/S Ratio for {symbol}...")
-        async with session.get(ls_url, params=ls_params, headers=HEADERS, timeout=15) as resp:
-            status = resp.status
-            debug_print(f"  Bybit L/S response status: {status}")
-            
-            if status == 200:
+        # 1. Long/Short Ratio (aggregated across exchanges)
+        ls_url = f"{base_url}/indicator/long_short_ratio"
+        params = {'symbol': symbol, 'ex': 'Binance'}  # Default to Binance
+        
+        async with session.get(ls_url, params=params, headers=HEADERS, timeout=10) as resp:
+            if resp.status == 200:
                 data = await resp.json()
-                debug_print(f"  Bybit L/S data: {json.dumps(data, indent=2)}")
-                
-                ret_code = data.get('retCode', -1)
-                if ret_code == 0 and data.get('result', {}).get('list'):
-                    item = data['result']['list'][0]
-                    buy_r = float(item.get('buyRatio', 0))
-                    sell_r = float(item.get('sellRatio', 1))
-                    if sell_r > 0:
-                        ls_ratio = round(buy_r / sell_r, 2)
-                        debug_print(f"  ✅ L/S Ratio: {ls_ratio} (buy={buy_r}, sell={sell_r})")
-                else:
-                    debug_print(f"  ⚠️ retCode={ret_code} or empty list")
+                if data.get('success') and data.get('data'):
+                    # Get latest ratio
+                    latest = data['data'][0] if isinstance(data['data'], list) else data['data']
+                    long_rate = float(latest.get('longRate', 0))
+                    short_rate = float(latest.get('shortRate', 1))
+                    if short_rate > 0:
+                        ls_ratio = round(long_rate / short_rate, 2)
+                    print(f"   ✅ {symbol} L/S Ratio: {ls_ratio}")
             else:
-                text = await resp.text()
-                debug_print(f"  ❌ Error {status}: {text}")
-    except asyncio.TimeoutError:
-        debug_print(f"  ⏱️ Timeout fetching L/S for {symbol}")
+                print(f"   ⚠️ {symbol} L/S API returned {resp.status}")
+    
     except Exception as e:
-        debug_print(f"  ❌ Exception fetching L/S: {type(e).__name__}: {e}")
+        print(f"   ❌ Error fetching L/S for {symbol}: {e}")
     
     try:
-        debug_print(f"Fetching Activity for {symbol}...")
-        async with session.get(tick_url, params=tick_params, headers=HEADERS, timeout=15) as resp:
-            status = resp.status
-            debug_print(f"  Bybit Activity response status: {status}")
-            
-            if status == 200:
+        # 2. Liquidation Data (24h)
+        liq_url = f"{base_url}/liquidation_history"
+        params = {'symbol': symbol, 'time_type': '1'}  # 1 = 24h
+        
+        async with session.get(liq_url, params=params, headers=HEADERS, timeout=10) as resp:
+            if resp.status == 200:
                 data = await resp.json()
-                
-                ret_code = data.get('retCode', -1)
-                if ret_code == 0 and data.get('result', {}).get('list'):
-                    activity = float(data['result']['list'][0].get('turnover24h', 0))
-                    debug_print(f"  ✅ Activity: {activity}")
-                else:
-                    debug_print(f"  ⚠️ retCode={ret_code} or empty list")
-            else:
-                text = await resp.text()
-                debug_print(f"  ❌ Error {status}: {text}")
-    except asyncio.TimeoutError:
-        debug_print(f"  ⏱️ Timeout fetching Activity for {symbol}")
+                if data.get('success') and data.get('data'):
+                    liq_data = data['data']
+                    # Sum long + short liquidations
+                    liquidations_24h = float(liq_data.get('totalLong', 0)) + float(liq_data.get('totalShort', 0))
+                    print(f"   ✅ {symbol} Liquidations 24h: ${liquidations_24h:,.0f}")
+    
     except Exception as e:
-        debug_print(f"  ❌ Exception fetching Activity: {type(e).__name__}: {e}")
+        print(f"   ❌ Error fetching liquidations for {symbol}: {e}")
     
-    return ls_ratio, activity
+    try:
+        # 3. Open Interest (aggregated)
+        oi_url = f"{base_url}/open_interest"
+        params = {'symbol': symbol}
+        
+        async with session.get(oi_url, params=params, headers=HEADERS, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data.get('success') and data.get('data'):
+                    # Get total OI across exchanges
+                    oi_list = data['data']
+                    if isinstance(oi_list, list) and len(oi_list) > 0:
+                        global_oi = sum(float(item.get('openInterest', 0)) for item in oi_list)
+                    elif isinstance(oi_list, dict):
+                        global_oi = float(oi_list.get('openInterest', 0))
+                    print(f"   ✅ {symbol} Global OI: ${global_oi:,.0f}")
+    
+    except Exception as e:
+        print(f"   ❌ Error fetching OI for {symbol}: {e}")
+    
+    # Delay to avoid rate limits (free tier)
+    await asyncio.sleep(1.5)
+    
+    return ls_ratio, liquidations_24h, global_oi
 
-async def fetch_deep_metrics(session, kraken_symbol):
-    """Orchestrate fetching with fallback logic"""
-    primary, fallback = map_symbol(kraken_symbol)
-    
-    if not primary:
-        return 0, 0, 0
-    
-    debug_print(f"\n{'='*60}")
-    debug_print(f"Processing {kraken_symbol} -> {primary}")
-    
-    # Try primary symbol
-    cvd = await fetch_binance_cvd(session, primary)
-    ls, act = await fetch_bybit_metrics(session, primary)
-    
-    # If all failed and fallback exists, try fallback
-    if cvd == 0 and ls == 0 and fallback:
-        print(f"   ⚠️ Primary failed, trying fallback {fallback}")
-        debug_print(f"Trying fallback symbol: {fallback}")
-        cvd = await fetch_binance_cvd(session, fallback)
-        ls, act = await fetch_bybit_metrics(session, fallback)
-    
-    debug_print(f"Final results: LS={ls}, CVD={cvd}, Activity={act}")
-    debug_print(f"{'='*60}\n")
-    
-    return ls, cvd, act
+# --- 3. FALLBACK: CALCULATE CVD FROM KRAKEN ---
+def calculate_cvd_from_kraken(ticker_info):
+    """
+    Estimate CVD from Kraken's bid/ask volume
+    Not as accurate as exchange data but works without API blocks
+    """
+    try:
+        raw = ticker_info.get('info', {})
+        bid_vol = float(raw.get('bidVolume', 0))
+        ask_vol = float(raw.get('askVolume', 0))
+        
+        # CVD approximation: bid volume (buy pressure) - ask volume (sell pressure)
+        return round(bid_vol - ask_vol, 0)
+    except:
+        return 0
 
-# --- 3. MAIN LOGIC ---
+# --- 4. MAIN LOGIC ---
 async def main():
     print("\n" + "="*60)
-    print("🔥 CRYPTO DATA COLLECTOR - GITHUB ACTIONS VERSION")
+    print("🔥 CRYPTO DATA COLLECTOR - COINGLASS VERSION")
     print("="*60 + "\n")
     print("🚀 Script Started...")
+    
+    if COINGLASS_API_KEY:
+        print(f"✅ Using CoinGlass API Key (better rate limits)")
+    else:
+        print(f"⚠️ No API key - using free tier (limited)")
     
     # Only use Kraken for base data
     kraken = ccxt.krakenfutures({'enableRateLimit': True})
     
     try:
         # --- A. FETCH KRAKEN (Base Layer) ---
-        print("🔌 Fetching Kraken Tickers...")
+        print("\n🔌 Fetching Kraken Tickers...")
         tickers = await kraken.fetch_tickers()
         
         market_data = []
@@ -221,47 +175,48 @@ async def main():
                         'Price': float(price),
                         'Volume': float(vol),
                         'OI': float(raw.get('openInterest', 0)),
-                        'Funding': float(raw.get('fundingRate', 0)) * 100
+                        'Funding': float(raw.get('fundingRate', 0)) * 100,
+                        'CVD_Estimate': calculate_cvd_from_kraken(data),
+                        'Ticker_Info': data  # Store for later use
                     })
 
         # Sort by volume
         top_coins = sorted(market_data, key=lambda x: x['Volume'], reverse=True)[:TOP_N]
         print(f"✅ Kraken Data: Found {len(top_coins)} coins.")
-        print(f"   Top 3: {[c['Symbol'] for c in top_coins[:3]]}")
+        print(f"   Top 5: {[c['Symbol'] for c in top_coins[:5]]}")
 
-        # --- B. DEEP SCAN WITH SHARED SESSION ---
-        print(f"\n🕵️ Deep Scanning Top {DEEP_SCAN_LIMIT} coins...")
-        print(f"   Debug mode: {'ON' if DEBUG else 'OFF'}")
+        # --- B. DEEP SCAN WITH COINGLASS ---
+        print(f"\n🕵️ Fetching enhanced metrics for top {DEEP_SCAN_LIMIT} coins...")
+        print(f"   Using CoinGlass aggregated data (no geo-blocks!)")
         
         final_rows = []
         success_count = 0
         
-        # Create ONE shared aiohttp session with connection pooling
-        connector = aiohttp.TCPConnector(limit=10, limit_per_host=2, ttl_dns_cache=300)
-        timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=15)
-        
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        async with aiohttp.ClientSession() as session:
             for i, coin in enumerate(top_coins):
-                ls, cvd, act = 0, 0, 0
+                ls, liq, global_oi = 0, 0, 0
+                cvd = coin['CVD_Estimate']  # Use Kraken estimate as fallback
                 
                 # Only fetch deep metrics for top coins
                 if i < DEEP_SCAN_LIMIT:
-                    ls, cvd, act = await fetch_deep_metrics(session, coin['Symbol'])
-                    
-                    if ls > 0 or cvd != 0 or act > 0:
-                        success_count += 1
-                        print(f"   ✅ {coin['Symbol']}: LS={ls}, CVD={cvd}, Activity={act:.0f}")
-                    
-                    # Add delay to avoid rate limits
-                    await asyncio.sleep(1.2)  # Increased to 1.2s for GitHub
+                    cg_symbol = map_symbol_to_coinglass(coin['Symbol'])
+                    if cg_symbol:
+                        print(f"\n📊 Processing {coin['Symbol']} -> {cg_symbol}")
+                        ls, liq, global_oi = await fetch_coinglass_metrics(session, cg_symbol)
+                        
+                        if ls > 0 or liq > 0:
+                            success_count += 1
+                
+                # Use global OI if available, otherwise use Kraken OI
+                final_oi = global_oi if global_oi > 0 else coin['OI']
                 
                 final_rows.append([
                     date_str, time_str, coin['Symbol'], coin['Price'],
-                    ls, cvd, coin['Volume'], coin['OI'], coin['Funding'], act
+                    ls, cvd, coin['Volume'], final_oi, coin['Funding'], liq
                 ])
                 
                 if (i + 1) % 10 == 0:
-                    print(f"   Processed {i + 1}/{len(top_coins)}")
+                    print(f"\n   Progress: {i + 1}/{len(top_coins)}")
         
         print(f"\n✅ Scan Complete!")
         print(f"   Success rate: {success_count}/{DEEP_SCAN_LIMIT} coins")
@@ -271,12 +226,13 @@ async def main():
         print(f"❌ FATAL ERROR: {e}")
         import traceback
         traceback.print_exc()
+        final_rows = []
     finally:
         await kraken.close()
     
     return final_rows
 
-# --- 4. UPLOADER ---
+# --- 5. UPLOADER ---
 def upload_to_sheets(data):
     if not data:
         print("⚠️ No data to upload!")
@@ -297,9 +253,9 @@ def upload_to_sheets(data):
         client = gspread.authorize(creds)
         sheet = client.open(SHEET_NAME).sheet1
 
-        # Define headers
-        HEADERS_ROW = ["Date", "Time", "Symbol", "Price", "LS_Ratio", "CVD_4h", 
-                       "Volume_24h", "Open_Interest", "Funding_Rate", "Activity_Score"]
+        # Define headers (changed Activity to Liquidations_24h)
+        HEADERS_ROW = ["Date", "Time", "Symbol", "Price", "LS_Ratio", "CVD_Est", 
+                       "Volume_24h", "Open_Interest", "Funding_Rate", "Liquidations_24h"]
         
         existing = sheet.get_all_values()
         
@@ -316,21 +272,18 @@ def upload_to_sheets(data):
         sheet.append_rows(data)
         print("✅ SUCCESS: Data pushed to Sheets.")
         
-        # Print detailed sample with non-zero values
-        print("\n📊 Sample data uploaded (first 5 with metrics):")
+        # Print sample with non-zero values
+        print("\n📊 Sample data uploaded:")
         shown = 0
         for row in data:
-            if row[4] > 0 or row[5] != 0:  # LS_Ratio or CVD
-                print(f"   {row[2]}: LS={row[4]}, CVD={row[5]}, Activity={row[9]:.0f}")
+            if row[4] > 0:  # Has L/S ratio
+                print(f"   {row[2]}: LS={row[4]}, CVD={row[5]}, Liq24h=${row[9]:,.0f}")
                 shown += 1
                 if shown >= 5:
                     break
         
         if shown == 0:
-            print("   ⚠️ WARNING: No rows with metrics found!")
-            print("   First 3 rows uploaded:")
-            for row in data[:3]:
-                print(f"   {row[2]}: LS={row[4]}, CVD={row[5]}")
+            print("   ⚠️ No advanced metrics available (check API key/limits)")
 
     except Exception as e:
         print(f"❌ SHEET ERROR: {e}")
@@ -348,3 +301,5 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("✅ SCRIPT COMPLETED")
     print("="*60)
+    print("\n💡 TIP: Set COINGLASS_API_KEY env var for better rate limits")
+    print("   Get free API key at: https://www.coinglass.com/CryptoApi")

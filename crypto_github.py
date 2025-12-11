@@ -1,6 +1,5 @@
 import asyncio
 import ccxt.async_support as ccxt
-import aiohttp
 import pandas as pd
 from datetime import datetime
 import os
@@ -10,142 +9,115 @@ from oauth2client.service_account import ServiceAccountCredentials
 import random
 
 # --- CONFIGURATION ---
-SHEET_NAME = "crypto_history" 
-TOP_N = 100
-MAX_CONCURRENT_REQUESTS = 2  # Ultra-low to avoid detection
+SHEET_NAME = "crypto_history"
+TOP_N_TOTAL = 100      # Fetch basic price/vol for 100 coins
+TOP_N_DEEP = 100        # Only fetch Deep Metrics (L/S, CVD) for Top 25 to avoid blocks
 
-# Rotating User Agents to bypass blocking
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-]
-
+# Symbol Mapping
 THOUSAND_COINS = {'PEPE', 'BONK', 'FLOKI', 'SHIB', 'LUNC', 'XEC', 'SATS', 'RATS'}
 
-# -----------------------------------------------------------------------------
-# 1. STEALTH HELPERS
-# -----------------------------------------------------------------------------
-def get_random_header():
-    return {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "application/json",
-        "Referer": "https://www.google.com/"
-    }
-
-def map_kraken_to_stealth(kraken_symbol):
+def map_kraken_to_generic(kraken_symbol):
+    """Maps Kraken 'XBT/USD:USD' -> 'BTC' & 'BTCUSDT'"""
     try:
         base = kraken_symbol.split('/')[0]
         if base == 'XBT': base = 'BTC'
         if base == 'XDG': base = 'DOGE'
-        generic = f"{base}USDT"
+        
+        generic_pair = f"{base}USDT"
         if base.upper() in THOUSAND_COINS:
-            return f"1000{base}USDT", generic
-        return generic, None
+            return base, f"1000{base}USDT"
+        return base, generic_pair
     except:
         return None, None
 
-async def fetch_binance_cvd(session, symbol):
-    """Tries FAPI (USDT) then DAPI (COIN) if blocked."""
-    # 1. Try Main Futures API (FAPI)
-    url_fapi = "https://fapi.binance.com/futures/data/takerlongshortRatio"
-    params = {'symbol': symbol, 'period': '4h', 'limit': 1}
-    
-    try:
-        async with session.get(url_fapi, params=params, headers=get_random_header(), timeout=5) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data and isinstance(data, list):
-                    return round(float(data[0]['buyVol']) - float(data[0]['sellVol']), 0)
-    except:
-        pass
-
-    # 2. Fallback: Coin-Margined API (DAPI) - Often less strict
-    # Note: DAPI symbols are like 'BTCUSD_PERP'
-    symbol_dapi = symbol.replace("USDT", "USD_PERP")
-    url_dapi = "https://dapi.binance.com/futures/data/takerlongshortRatio"
-    params['pair'] = symbol.replace("USDT", "USD") # DAPI uses pair/symbol differently
-    
-    try:
-        async with session.get(url_dapi, params=params, headers=get_random_header(), timeout=5) as resp:
-             if resp.status == 200:
-                data = await resp.json()
-                if data and isinstance(data, list):
-                    return round(float(data[0]['buyVol']) - float(data[0]['sellVol']), 0)
-    except:
-        pass
-        
-    return 0
-
-async def fetch_bybit_metrics(session, symbol):
-    """Fetches Bybit Data."""
-    ls_url = "https://api.bybit.com/v5/market/account-ratio"
-    ls_params = {'category': 'linear', 'symbol': symbol, 'period': '4h', 'limit': 1}
-    tick_url = "https://api.bybit.com/v5/market/tickers"
-    tick_params = {'category': 'linear', 'symbol': symbol}
-    
+# -----------------------------------------------------------------------------
+# 1. DEEP METRICS FETCHER (Using CCXT Implicit Methods)
+# -----------------------------------------------------------------------------
+async def fetch_deep_metrics(binance, bybit, symbol_usdt):
+    """
+    Fetches CVD (Binance) and L/S + Activity (Bybit) using CCXT.
+    Returns: (LS_Ratio, CVD, Activity)
+    """
     ls = 0.0
+    cvd = 0.0
     act = 0.0
     
+    # Random sleep to look like a human browsing
+    await asyncio.sleep(random.uniform(1.0, 3.0))
+
+    # A. BINANCE (CVD)
     try:
-        # L/S Ratio
-        async with session.get(ls_url, params=ls_params, headers=get_random_header(), timeout=5) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data['retCode'] == 0 and data['result']['list']:
-                    item = data['result']['list'][0]
-                    buy = float(item['buyRatio'])
-                    sell = float(item['sellRatio'])
-                    if sell > 0: ls = round(buy / sell, 2)
-        
-        # Activity
-        async with session.get(tick_url, params=tick_params, headers=get_random_header(), timeout=5) as resp:
-             if resp.status == 200:
-                data = await resp.json()
-                if data['retCode'] == 0 and data['result']['list']:
-                    act = float(data['result']['list'][0].get('turnover24h', 0))
-    except:
+        # Implicit API call: public_get_futures_data_takerlongshortratio
+        # Maps to: GET /futures/data/takerlongshortRatio
+        b_data = await binance.public_get_futures_data_takerlongshortratio({
+            'symbol': symbol_usdt,
+            'period': '4h',
+            'limit': 1
+        })
+        if b_data:
+            buy = float(b_data[0]['buyVol'])
+            sell = float(b_data[0]['sellVol'])
+            cvd = round(buy - sell, 0)
+    except Exception:
+        pass # Fail silently (keep 0)
+
+    # B. BYBIT (L/S Ratio & Activity)
+    try:
+        # 1. L/S Ratio (public_get_v5_market_account_ratio)
+        ls_data = await bybit.public_get_v5_market_account_ratio({
+            'category': 'linear',
+            'symbol': symbol_usdt,
+            'period': '4h',
+            'limit': 1
+        })
+        if ls_data['retCode'] == 0 and ls_data['result']['list']:
+            item = ls_data['result']['list'][0]
+            buy_r = float(item['buyRatio'])
+            sell_r = float(item['sellRatio'])
+            if sell_r > 0: ls = round(buy_r / sell_r, 2)
+
+        # 2. Activity/Turnover (public_get_v5_market_tickers)
+        tick_data = await bybit.public_get_v5_market_tickers({
+            'category': 'linear',
+            'symbol': symbol_usdt
+        })
+        if tick_data['retCode'] == 0 and tick_data['result']['list']:
+            act = float(tick_data['result']['list'][0].get('turnover24h', 0))
+            
+    except Exception:
         pass
-        
-    return ls, act
 
-async def get_stealth_data_throttled(session, semaphore, kraken_symbol):
-    async with semaphore:
-        await asyncio.sleep(random.uniform(0.5, 1.5)) # Longer human-like delay
-        
-        target, fallback = map_kraken_to_stealth(kraken_symbol)
-        if not target: return 0, 0, 0
-
-        cvd = await fetch_binance_cvd(session, target)
-        ls, act = await fetch_bybit_metrics(session, target)
-        
-        if cvd == 0 and ls == 0 and fallback:
-            cvd = await fetch_binance_cvd(session, fallback)
-            ls, act = await fetch_bybit_metrics(session, fallback)
-
-        return ls, cvd, act
+    return ls, cvd, act
 
 # -----------------------------------------------------------------------------
-# 2. MAIN DATA ENGINE
+# 2. MAIN LOGIC
 # -----------------------------------------------------------------------------
-async def get_enriched_data():
-    print("🔌 Connecting to Kraken Futures...")
-    exchange = ccxt.krakenfutures({'enableRateLimit': True})
+async def main():
+    print("🔌 Initializing Exchanges...")
+    kraken = ccxt.krakenfutures({'enableRateLimit': True})
+    
+    # Initialize Binance/Bybit for Deep Metrics
+    # We use 'enableRateLimit' to automatically space out requests
+    binance = ccxt.binanceusdm({'enableRateLimit': True}) 
+    bybit = ccxt.bybit({'enableRateLimit': True})
 
     try:
-        tickers = await exchange.fetch_tickers()
+        # A. FETCH KRAKEN (Base Layer)
+        print("📊 Fetching Kraken Top 100...")
+        tickers = await kraken.fetch_tickers()
         market_data = []
         
         now = datetime.now()
         date_str = now.strftime('%Y-%m-%d')
         time_str = now.strftime('%H:%M:%S')
         
-        print("📊 Fetching Kraken Data...")
         for symbol, data in tickers.items():
             if ':USD' in symbol:
                 raw = data.get('info', {})
                 price = data.get('last')
                 vol_usd = raw.get('volumeQuote')
+                
+                # Volume Fallback
                 if vol_usd is None:
                     vol_24h = raw.get('vol24h')
                     if vol_24h and price:
@@ -155,41 +127,59 @@ async def get_enriched_data():
                 funding = raw.get('fundingRate')
                 
                 if price and vol_usd:
+                    base_coin, generic_usdt = map_kraken_to_generic(symbol)
                     market_data.append({
-                        'Date': date_str, 'Time': time_str, 'Symbol': symbol,
-                        'Price': float(price), 'Volume_24h': float(vol_usd),
+                        'Date': date_str, 'Time': time_str, 
+                        'Symbol': symbol,   # Kraken Symbol
+                        'Pair': generic_usdt, # USDT Pair for other exchanges
+                        'Price': float(price), 
+                        'Volume_24h': float(vol_usd),
                         'Open_Interest': float(oi) if oi else 0.0,
-                        'Funding_Rate': float(funding) * 100 if funding else 0.0
+                        'Funding_Rate': float(funding) * 100 if funding else 0.0,
+                        # Default Deep Metrics to 0
+                        'LS_Ratio': 0.0, 'CVD_4h': 0.0, 'Activity_Score': 0.0
                     })
         
-        top_coins = sorted(market_data, key=lambda x: x['Volume_24h'], reverse=True)[:TOP_N]
-        print(f"✅ Found {len(top_coins)} coins. Starting Stealth Fetch...")
+        # Sort Top 100
+        all_coins = sorted(market_data, key=lambda x: x['Volume_24h'], reverse=True)[:TOP_N_TOTAL]
+        
+        # Identify Top N for Deep Scan
+        deep_scan_coins = all_coins[:TOP_N_DEEP]
+        print(f"✅ Found {len(all_coins)} coins. Deep Scanning Top {len(deep_scan_coins)}...")
 
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-        async with aiohttp.ClientSession() as session:
-            tasks = [get_stealth_data_throttled(session, semaphore, coin['Symbol']) for coin in top_coins]
-            results = await asyncio.gather(*tasks)
+        # B. FETCH DEEP METRICS (Sequential to avoid blocks)
+        for i, coin in enumerate(deep_scan_coins):
+            # Print progress to logs
+            print(f"   Scanning {i+1}/{len(deep_scan_coins)}: {coin['Pair']}...")
+            
+            ls, cvd, act = await fetch_deep_metrics(binance, bybit, coin['Pair'])
+            
+            # Update the record in the main list (all_coins references the same dicts)
+            coin['LS_Ratio'] = ls
+            coin['CVD_4h'] = cvd
+            coin['Activity_Score'] = act
 
-            final_rows = []
-            for i, (ls, cvd, act) in enumerate(results):
-                coin = top_coins[i]
-                final_rows.append([
-                    coin['Date'], coin['Time'], coin['Symbol'], coin['Price'],
-                    ls, cvd, coin['Volume_24h'], coin['Open_Interest'], 
-                    coin['Funding_Rate'], act
-                ])
-
+        # C. PREPARE DATA FOR SHEETS
+        final_rows = []
+        for coin in all_coins:
+            final_rows.append([
+                coin['Date'], coin['Time'], coin['Symbol'], coin['Price'],
+                coin['LS_Ratio'], coin['CVD_4h'], coin['Volume_24h'], 
+                coin['Open_Interest'], coin['Funding_Rate'], coin['Activity_Score']
+            ])
+            
         return final_rows
 
     finally:
-        await exchange.close()
+        await kraken.close()
+        await binance.close()
+        await bybit.close()
 
 # -----------------------------------------------------------------------------
-# 3. GOOGLE SHEETS UPLOADER (FIXED HEADERS)
+# 3. UPLOADER
 # -----------------------------------------------------------------------------
 def update_google_sheet(data):
     print("📈 Connecting to Google Sheets...")
-    
     creds_json = os.environ.get('GCP_CREDENTIALS')
     if not creds_json: raise ValueError("No GCP_CREDENTIALS found!")
 
@@ -200,23 +190,17 @@ def update_google_sheet(data):
     try:
         sheet = client.open(SHEET_NAME).sheet1
         
-        # --- HEADER FIX LOGIC ---
         NEW_HEADERS = [
             "Date", "Time", "Symbol", "Price", 
             "LS_Ratio", "CVD_4h", "Volume_24h", 
             "Open_Interest", "Funding_Rate", "Activity_Score"
         ]
         
-        # Check if first row exists and matches new headers
-        existing_headers = sheet.row_values(1)
-        
-        if existing_headers != NEW_HEADERS:
-            print("⚠️ Headers mismatch. Updating headers...")
-            if existing_headers:
-                # If there are old headers, remove them first to avoid duplicates
-                sheet.delete_row(1)
+        # Force Update Headers if missing or mismatch
+        if not sheet.get_all_values() or sheet.row_values(1) != NEW_HEADERS:
+            print("⚠️ Updating Headers...")
+            if sheet.get_all_values(): sheet.delete_row(1)
             sheet.insert_row(NEW_HEADERS, 1)
-        # -------------------------
 
         sheet.append_rows(data)
         print("✅ Success! Data uploaded.")
@@ -229,8 +213,6 @@ if __name__ == "__main__":
     if platform.system() == 'Windows':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    data_rows = asyncio.run(get_enriched_data())
+    data_rows = asyncio.run(main())
     if data_rows:
         update_google_sheet(data_rows)
-    else:
-        print("⚠️ No data to upload.")

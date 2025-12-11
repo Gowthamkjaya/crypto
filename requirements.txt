@@ -1,3 +1,4 @@
+ccxt
 streamlit
 pandas
 plotly

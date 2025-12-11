@@ -1,7 +1,5 @@
-ccxt
-aiohttp
+streamlit
 pandas
+plotly
 gspread
 oauth2client
-datetime
-asyncio

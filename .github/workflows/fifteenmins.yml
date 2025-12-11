@@ -1,0 +1,30 @@
+name: Hourly Crypto Logger
+
+on:
+  schedule:
+    # Run at minute 0 of every hour
+    - cron: '*/15 * * * *'
+  # Allow manual trigger for testing
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run script
+        env:
+          GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+        run: python crypto_github.py

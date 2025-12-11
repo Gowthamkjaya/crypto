@@ -27,4 +27,4 @@ jobs:
       - name: Run script
         env:
           GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
-        run: python crypto_history.py
+        run: python crypto_github.py

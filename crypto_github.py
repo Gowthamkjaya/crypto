@@ -13,12 +13,12 @@ SHEET_NAME = "crypto_history"
 TOP_N = 100            # Total coins to fetch from Kraken
 DEEP_SCAN_LIMIT = 25   # Limit deep scan to top 25 to minimize block risk
 
-# --- 1. SETUP EXCHANGES (Using CCXT for everything) ---
+# --- 1. SETUP EXCHANGES ---
 async def get_exchanges():
     # Load exchanges with rate limiting enabled
     kraken = ccxt.krakenfutures({'enableRateLimit': True})
     
-    # We use CCXT for Binance/Bybit too, as it handles headers/sessions better than raw requests
+    # Binance USD-M Futures
     binance = ccxt.binanceusdm({
         'enableRateLimit': True, 
         'options': {'defaultType': 'future'}
@@ -30,14 +30,13 @@ async def get_exchanges():
 # --- 2. STEALTH DATA FETCHER ---
 async def fetch_deep_metrics(binance, bybit, symbol):
     """
-    Fetches metrics using CCXT implicit API methods.
+    Fetches metrics using CCXT implicit API methods (Snake Case).
     """
     ls_ratio = 0.0
     cvd = 0.0
     activity = 0.0
     
     # Map Symbol (Kraken -> Generic)
-    # Kraken: 'XBT/USD:USD' -> 'BTCUSDT'
     try:
         base = symbol.split('/')[0]
         if base == 'XBT': base = 'BTC'
@@ -53,8 +52,9 @@ async def fetch_deep_metrics(binance, bybit, symbol):
 
     try:
         # A. BINANCE CVD (Taker Buy/Sell Volume)
-        # Endpoint: fapiPublicGetFuturesDataTakerlongshortRatio
-        cvd_data = await binance.fapiPublicGetFuturesDataTakerlongshortRatio({
+        # Endpoint: GET /futures/data/takerlongshortRatio
+        # CCXT Python uses snake_case: public_get_futures_data_takerlongshortratio
+        cvd_data = await binance.public_get_futures_data_takerlongshortratio({
             'symbol': target, 'period': '4h', 'limit': 1
         })
         if cvd_data:
@@ -64,7 +64,7 @@ async def fetch_deep_metrics(binance, bybit, symbol):
 
         # B. BYBIT METRICS
         # 1. L/S Ratio
-        ls_data = await bybit.v5PublicGetMarketAccountRatio({
+        ls_data = await bybit.v5_public_get_market_account_ratio({
             'category': 'linear', 'symbol': target, 'period': '4h', 'limit': 1
         })
         if ls_data['retCode'] == 0 and ls_data['result']['list']:
@@ -74,15 +74,14 @@ async def fetch_deep_metrics(binance, bybit, symbol):
             if sell_r > 0: ls_ratio = round(buy_r / sell_r, 2)
 
         # 2. Activity (Turnover)
-        tick_data = await bybit.v5PublicGetMarketTickers({
+        tick_data = await bybit.v5_public_get_market_tickers({
             'category': 'linear', 'symbol': target
         })
         if tick_data['retCode'] == 0 and tick_data['result']['list']:
             activity = float(tick_data['result']['list'][0].get('turnover24h', 0))
 
-    except Exception as e:
-        # If this prints in your logs, we know exactly why it's failing
-        # print(f"⚠️ Fetch Error ({target}): {e}") 
+    except Exception:
+        # Fail silently (return 0s) to keep the script running
         pass
 
     return ls_ratio, cvd, activity
@@ -94,13 +93,13 @@ async def main():
 
     try:
         # --- CONNECTIVITY CHECK ---
-        print("📡 Testing Connectivity to Binance/Bybit...")
+        print("📡 Testing Connectivity...")
         try:
-            test_cvd = await binance.fapiPublicGetFuturesDataTakerlongshortRatio({'symbol': 'BTCUSDT', 'period': '4h', 'limit': 1})
-            print(f"✅ Binance Connected! (Test Data: {test_cvd[0]['buyVol']})")
+            # Test Binance with snake_case method
+            await binance.public_get_futures_data_takerlongshortratio({'symbol': 'BTCUSDT', 'period': '4h', 'limit': 1})
+            print("✅ Binance Connected!")
         except Exception as e:
-            print(f"❌ BINANCE BLOCKED: {e}")
-            print("   (Data will be 0 for CVD)")
+            print(f"❌ BINANCE ERROR: {e}")
 
         # --- A. FETCH KRAKEN (Base Layer) ---
         print("🔌 Fetching Kraken Tickers...")
@@ -134,17 +133,17 @@ async def main():
         top_coins = sorted(market_data, key=lambda x: x['Volume'], reverse=True)[:TOP_N]
         print(f"✅ Kraken Data: Found {len(top_coins)} coins.")
 
-        # --- B. DEEP SCAN (Sequential to be safe) ---
+        # --- B. DEEP SCAN ---
         print(f"🕵️ Deep Scanning Top {DEEP_SCAN_LIMIT} coins...")
         
         final_rows = []
         for i, coin in enumerate(top_coins):
             ls, cvd, act = 0, 0, 0
             
-            # Only fetch deep metrics for top coins to save time/requests
+            # Only fetch deep metrics for top coins
             if i < DEEP_SCAN_LIMIT:
                 ls, cvd, act = await fetch_deep_metrics(binance, bybit, coin['Symbol'])
-                # Random sleep to avoid rate limits (Critical for GitHub)
+                # Random sleep to avoid rate limits
                 await asyncio.sleep(0.5) 
             
             final_rows.append([
@@ -152,7 +151,6 @@ async def main():
                 ls, cvd, coin['Volume'], coin['OI'], coin['Funding'], act
             ])
             
-            # Print progress every 10 coins
             if i % 10 == 0: print(f"   Processed {i}/{len(top_coins)}")
 
     finally:
@@ -181,16 +179,18 @@ def upload_to_sheets(data):
         client = gspread.authorize(creds)
         sheet = client.open(SHEET_NAME).sheet1
 
-        # Check Headers
+        # CLEAR & REWRITE STRATEGY (Safer than delete_row)
+        print("🧹 Clearing old data to prevent errors...")
+        sheet.clear()
+
+        # HEADERS
         HEADERS = ["Date", "Time", "Symbol", "Price", "LS_Ratio", "CVD_4h", 
                    "Volume_24h", "Open_Interest", "Funding_Rate", "Activity_Score"]
         
-        existing = sheet.get_all_values()
-        if not existing or existing[0] != HEADERS:
-            print("⚠️ Updating Headers...")
-            if existing: sheet.delete_row(1)
-            sheet.insert_row(HEADERS, 1)
-
+        # Add Headers first
+        sheet.append_row(HEADERS)
+        
+        # Add Data
         sheet.append_rows(data)
         print("✅ SUCCESS: Data pushed to Sheets.")
 

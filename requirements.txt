@@ -2,3 +2,4 @@ ccxt
 pandas
 gspread
 oauth2client
+aiohttp

@@ -7,6 +7,7 @@ import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import random
+import aiohttp # Ensure this is in requirements.txt
 
 # --- CONFIGURATION ---
 SHEET_NAME = "crypto_history" 
@@ -15,28 +16,18 @@ DEEP_SCAN_LIMIT = 25   # Limit deep scan to top 25 to minimize block risk
 
 # --- 1. SETUP EXCHANGES ---
 async def get_exchanges():
-    # Load exchanges with rate limiting enabled
     kraken = ccxt.krakenfutures({'enableRateLimit': True})
-    
-    # Binance USD-M Futures
-    binance = ccxt.binanceusdm({
-        'enableRateLimit': True, 
-        'options': {'defaultType': 'future'}
-    })
+    binance = ccxt.binanceusdm({'enableRateLimit': True, 'options': {'defaultType': 'future'}})
     bybit = ccxt.bybit({'enableRateLimit': True})
-    
     return kraken, binance, bybit
 
-# --- 2. STEALTH DATA FETCHER ---
+# --- 2. STEALTH DATA FETCHER (With Fallback) ---
 async def fetch_deep_metrics(binance, bybit, symbol):
-    """
-    Fetches metrics using CCXT implicit API methods (Snake Case).
-    """
     ls_ratio = 0.0
     cvd = 0.0
     activity = 0.0
     
-    # Map Symbol (Kraken -> Generic)
+    # Map Symbol
     try:
         base = symbol.split('/')[0]
         if base == 'XBT': base = 'BTC'
@@ -50,19 +41,35 @@ async def fetch_deep_metrics(binance, bybit, symbol):
     except:
         return 0, 0, 0
 
+    # --- A. BINANCE CVD ---
     try:
-        # A. BINANCE CVD (Taker Buy/Sell Volume)
-        # Endpoint: GET /futures/data/takerlongshortRatio
-        # CCXT Python uses snake_case: public_get_futures_data_takerlongshortratio
-        cvd_data = await binance.public_get_futures_data_takerlongshortratio({
+        # Try CCXT Method (Snake Case for /futures/data/takerlongshortRatio)
+        cvd_data = await binance.fapiData_get_takerlongshortratio({
             'symbol': target, 'period': '4h', 'limit': 1
         })
         if cvd_data:
             buy = float(cvd_data[0]['buyVol'])
             sell = float(cvd_data[0]['sellVol'])
             cvd = round(buy - sell, 0)
+            
+    except AttributeError:
+        # FALLBACK: If CCXT method name is wrong, use raw REST request
+        try:
+            url = f"https://fapi.binance.com/futures/data/takerlongshortRatio?symbol={target}&period=4h&limit=1"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers={'User-Agent': 'Mozilla/5.0'}) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        buy = float(data[0]['buyVol'])
+                        sell = float(data[0]['sellVol'])
+                        cvd = round(buy - sell, 0)
+        except:
+            pass # Give up silently
+    except Exception:
+        pass
 
-        # B. BYBIT METRICS
+    # --- B. BYBIT METRICS ---
+    try:
         # 1. L/S Ratio
         ls_data = await bybit.v5_public_get_market_account_ratio({
             'category': 'linear', 'symbol': target, 'period': '4h', 'limit': 1
@@ -81,7 +88,6 @@ async def fetch_deep_metrics(binance, bybit, symbol):
             activity = float(tick_data['result']['list'][0].get('turnover24h', 0))
 
     except Exception:
-        # Fail silently (return 0s) to keep the script running
         pass
 
     return ls_ratio, cvd, activity
@@ -92,15 +98,6 @@ async def main():
     kraken, binance, bybit = await get_exchanges()
 
     try:
-        # --- CONNECTIVITY CHECK ---
-        print("📡 Testing Connectivity...")
-        try:
-            # Test Binance with snake_case method
-            await binance.public_get_futures_data_takerlongshortratio({'symbol': 'BTCUSDT', 'period': '4h', 'limit': 1})
-            print("✅ Binance Connected!")
-        except Exception as e:
-            print(f"❌ BINANCE ERROR: {e}")
-
         # --- A. FETCH KRAKEN (Base Layer) ---
         print("🔌 Fetching Kraken Tickers...")
         tickers = await kraken.fetch_tickers()
@@ -179,18 +176,21 @@ def upload_to_sheets(data):
         client = gspread.authorize(creds)
         sheet = client.open(SHEET_NAME).sheet1
 
-        # CLEAR & REWRITE STRATEGY (Safer than delete_row)
-        print("🧹 Clearing old data to prevent errors...")
-        sheet.clear()
-
-        # HEADERS
+        # HEADERS CHECK
         HEADERS = ["Date", "Time", "Symbol", "Price", "LS_Ratio", "CVD_4h", 
                    "Volume_24h", "Open_Interest", "Funding_Rate", "Activity_Score"]
         
-        # Add Headers first
-        sheet.append_row(HEADERS)
+        existing = sheet.get_all_values()
         
-        # Add Data
+        if not existing:
+            print("📝 Sheet is empty. Adding headers...")
+            sheet.append_row(HEADERS)
+        elif existing[0] != HEADERS:
+            print("⚠️ Header mismatch. Updating headers...")
+            # FIX: Use delete_rows instead of delete_row
+            sheet.delete_rows(1)
+            sheet.insert_row(HEADERS, 1)
+
         sheet.append_rows(data)
         print("✅ SUCCESS: Data pushed to Sheets.")
 

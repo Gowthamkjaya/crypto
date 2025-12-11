@@ -1,5 +1,5 @@
-ccxt>=4.0.0
+ccxt
+aiohttp
 pandas
 gspread
 oauth2client
-aiohttp

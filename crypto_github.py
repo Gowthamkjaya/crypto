@@ -8,7 +8,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # CONFIGURATION
-SHEET_NAME = "Kraken_History"  # Make sure this matches your Google Sheet name exactly
+SHEET_NAME = "crypto_history"  # Make sure this matches your Google Sheet name exactly
 
 async def get_kraken_futures_data():
     print("🔌 Connecting to Kraken Futures...")
@@ -101,4 +101,5 @@ if __name__ == "__main__":
     if data_rows:
         update_google_sheet(data_rows)
     else:
+
         print("⚠️ No data to upload.")

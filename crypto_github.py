@@ -11,227 +11,209 @@ import random
 
 # --- CONFIGURATION ---
 SHEET_NAME = "crypto_history" 
-TOP_N = 100
-MAX_CONCURRENT_REQUESTS = 5  # Limits parallel requests to avoid blocking
+TOP_N = 100            # Total coins to fetch from Kraken
+DEEP_SCAN_LIMIT = 30   # Only scan top 30 for stealth metrics to avoid blocking
+MAX_CONCURRENT = 3     # Slow and steady wins the race
 
-# Stealth Mode Headers
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Accept": "application/json",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.google.com/"
-}
+# Rotating User Agents (To trick Binance/Bybit WAF)
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+]
 
-# Coins that often have '1000' prefix on Binance/Bybit
-THOUSAND_COINS = {'PEPE', 'BONK', 'FLOKI', 'SHIB', 'LUNC', 'XEC', 'SATS', 'RATS'}
+def get_header():
+    return {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json",
+        "Referer": "https://www.google.com/"
+    }
 
 # -----------------------------------------------------------------------------
-# 1. STEALTH HELPERS (Binance/Bybit Data)
+# 1. STEALTH METRICS (Robust Implementation)
 # -----------------------------------------------------------------------------
-def map_kraken_to_stealth(kraken_symbol):
-    """Maps Kraken symbols (e.g. XBT/USD:USD) to generic USDT pairs."""
+def map_symbol(kraken_symbol):
+    """Maps Kraken 'XBT/USD:USD' -> 'BTCUSDT'"""
     try:
         base = kraken_symbol.split('/')[0]
         if base == 'XBT': base = 'BTC'
         if base == 'XDG': base = 'DOGE'
         
-        generic = f"{base}USDT"
-        # Return tuple: (Primary, Fallback)
-        if base.upper() in THOUSAND_COINS:
-            return f"1000{base}USDT", generic
-        return generic, None
+        # Meme coin fix: check if we need 1000 prefix
+        thousands = {'PEPE', 'BONK', 'FLOKI', 'SHIB', 'LUNC', 'SATS', 'RATS'}
+        if base.upper() in thousands:
+            return f"1000{base}USDT"
+        return f"{base}USDT"
     except:
-        return None, None
+        return None
 
-async def fetch_binance_cvd(session, symbol):
-    """Fetches CVD from Binance."""
-    url = "https://fapi.binance.com/futures/data/takerlongshortRatio"
-    params = {'symbol': symbol, 'period': '4h', 'limit': 1}
-    try:
-        async with session.get(url, params=params, headers=HEADERS, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data and isinstance(data, list):
-                    buy = float(data[0]['buyVol'])
-                    sell = float(data[0]['sellVol'])
-                    return round(buy - sell, 0)
-    except:
-        pass
-    return 0
-
-async def fetch_bybit_metrics(session, symbol):
-    """Fetches L/S Ratio and Activity (Turnover) from Bybit."""
-    ls_url = "https://api.bybit.com/v5/market/account-ratio"
-    ls_params = {'category': 'linear', 'symbol': symbol, 'period': '4h', 'limit': 1}
-    tick_url = "https://api.bybit.com/v5/market/tickers"
-    tick_params = {'category': 'linear', 'symbol': symbol}
-    
+async def fetch_stealth_metrics(session, semaphore, kraken_symbol):
+    """Fetches CVD and L/S Ratio with error handling."""
     ls_ratio = 0.0
+    cvd = 0.0
     activity = 0.0
     
-    try:
-        # L/S Ratio
-        async with session.get(ls_url, params=ls_params, headers=HEADERS, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data['retCode'] == 0 and data['result']['list']:
-                    item = data['result']['list'][0]
-                    buy = float(item['buyRatio'])
-                    sell = float(item['sellRatio'])
-                    if sell > 0: ls_ratio = round(buy / sell, 2)
-        
-        # Activity
-        async with session.get(tick_url, params=tick_params, headers=HEADERS, timeout=10) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                if data['retCode'] == 0 and data['result']['list']:
-                    activity = float(data['result']['list'][0].get('turnover24h', 0))
-    except:
-        pass
-    return ls_ratio, activity
+    target_symbol = map_symbol(kraken_symbol)
+    if not target_symbol: return 0, 0, 0
 
-async def get_stealth_data_throttled(session, semaphore, kraken_symbol):
-    """
-    Orchestrates the fetch with a semaphore (Traffic Light).
-    """
     async with semaphore:
-        # Random delay to look human (Crucial for GitHub Actions)
-        await asyncio.sleep(random.uniform(0.2, 0.6))
+        await asyncio.sleep(random.uniform(0.5, 2.0)) # Random sleep to avoid blocks
         
-        target, fallback = map_kraken_to_stealth(kraken_symbol)
-        if not target: return 0, 0, 0
+        try:
+            # 1. Binance CVD (Taker Buy/Sell)
+            url_cvd = "https://fapi.binance.com/futures/data/takerlongshortRatio"
+            async with session.get(url_cvd, params={'symbol': target_symbol, 'period': '4h', 'limit': 1}, 
+                                 headers=get_header(), timeout=5) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if isinstance(data, list) and data:
+                        cvd = round(float(data[0]['buyVol']) - float(data[0]['sellVol']), 0)
 
-        # Try Primary
-        cvd = await fetch_binance_cvd(session, target)
-        ls, act = await fetch_bybit_metrics(session, target)
-        
-        # Retry with fallback if failed (e.g. PEPE vs 1000PEPE)
-        if cvd == 0 and ls == 0 and fallback:
-            cvd = await fetch_binance_cvd(session, fallback)
-            ls, act = await fetch_bybit_metrics(session, fallback)
+            # 2. Bybit L/S Ratio
+            url_ls = "https://api.bybit.com/v5/market/account-ratio"
+            async with session.get(url_ls, params={'category': 'linear', 'symbol': target_symbol, 'period': '4h', 'limit': 1},
+                                 headers=get_header(), timeout=5) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data['retCode'] == 0 and data['result']['list']:
+                        item = data['result']['list'][0]
+                        sell = float(item['sellRatio'])
+                        if sell > 0: ls_ratio = round(float(item['buyRatio']) / sell, 2)
+            
+            # 3. Bybit Activity (Turnover)
+            url_tick = "https://api.bybit.com/v5/market/tickers"
+            async with session.get(url_tick, params={'category': 'linear', 'symbol': target_symbol},
+                                 headers=get_header(), timeout=5) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data['retCode'] == 0 and data['result']['list']:
+                         activity = float(data['result']['list'][0].get('turnover24h', 0))
 
-        return ls, cvd, act
+        except Exception:
+            pass # Fail silently, return 0s, but DO NOT CRASH
+
+    return ls_ratio, cvd, activity
 
 # -----------------------------------------------------------------------------
 # 2. MAIN DATA ENGINE
 # -----------------------------------------------------------------------------
-async def get_enriched_data():
-    print("🔌 Connecting to Kraken Futures...")
+async def main():
+    print("🚀 Script Started...")
     exchange = ccxt.krakenfutures({'enableRateLimit': True})
+    
+    final_rows = []
 
     try:
-        # A. Fetch Base Layer (Kraken)
+        # A. FETCH KRAKEN DATA (Base Layer)
+        print("🔌 Fetching Kraken Tickers...")
         tickers = await exchange.fetch_tickers()
-        market_data = []
         
+        market_data = []
         now = datetime.now()
         date_str = now.strftime('%Y-%m-%d')
         time_str = now.strftime('%H:%M:%S')
-        
-        print("📊 Processing Kraken Data...")
+
         for symbol, data in tickers.items():
             if ':USD' in symbol:
                 raw = data.get('info', {})
                 price = data.get('last')
-                vol_usd = raw.get('volumeQuote')
-                if vol_usd is None:
-                    vol_24h = raw.get('vol24h')
-                    if vol_24h and price:
-                        vol_usd = float(vol_24h) * price
                 
-                oi = raw.get('openInterest')
-                funding = raw.get('fundingRate')
+                # Robust Volume calculation
+                vol = raw.get('volumeQuote')
+                if not vol:
+                    v24 = raw.get('vol24h')
+                    if v24 and price: vol = float(v24) * price
                 
-                if price and vol_usd:
+                if price and vol:
                     market_data.append({
-                        'Date': date_str,
-                        'Time': time_str,
                         'Symbol': symbol,
                         'Price': float(price),
-                        'Volume_24h': float(vol_usd),
-                        'Open_Interest': float(oi) if oi else 0.0,
-                        'Funding_Rate': float(funding) * 100 if funding else 0.0
+                        'Volume': float(vol),
+                        'OI': float(raw.get('openInterest', 0)),
+                        'Funding': float(raw.get('fundingRate', 0)) * 100
                     })
-        
-        # Sort Top N by Volume
-        top_coins = sorted(market_data, key=lambda x: x['Volume_24h'], reverse=True)[:TOP_N]
-        print(f"✅ Found Top {len(top_coins)} coins. Starting Feature Fetch (Throttled)...")
 
-        # B. Fetch Stealth Metrics (Throttled)
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+        # Sort Top N
+        top_coins = sorted(market_data, key=lambda x: x['Volume'], reverse=True)[:TOP_N]
+        print(f"✅ Kraken Data: Found {len(top_coins)} coins.")
+
+        # B. ENRICH WITH STEALTH METRICS (Parallel)
+        print(f"🕵️ Deep Scanning Top {DEEP_SCAN_LIMIT} coins (Stealth Mode)...")
+        
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT)
         async with aiohttp.ClientSession() as session:
-            tasks = [get_stealth_data_throttled(session, semaphore, coin['Symbol']) for coin in top_coins]
+            tasks = []
+            # Only scan the top N for deep metrics to save time/risk
+            for i, coin in enumerate(top_coins):
+                if i < DEEP_SCAN_LIMIT:
+                    tasks.append(fetch_stealth_metrics(session, semaphore, coin['Symbol']))
+                else:
+                    # Just return 0s for lower volume coins
+                    tasks.append(asyncio.sleep(0, result=(0, 0, 0)))
+            
             results = await asyncio.gather(*tasks)
 
-            final_rows = []
-            for i, (ls, cvd, act) in enumerate(results):
-                coin = top_coins[i]
-                
-                # Format Row for Sheets
+            # C. COMBINE DATA
+            for i, coin in enumerate(top_coins):
+                ls, cvd, act = results[i]
                 final_rows.append([
-                    coin['Date'],
-                    coin['Time'],
-                    coin['Symbol'],
-                    coin['Price'],
-                    ls,             # L/S Ratio
-                    cvd,            # CVD
-                    coin['Volume_24h'],
-                    coin['Open_Interest'],
-                    coin['Funding_Rate'],
-                    act             # Activity Score
+                    date_str, time_str, coin['Symbol'], coin['Price'],
+                    ls, cvd, coin['Volume'], coin['OI'], coin['Funding'], act
                 ])
-
-        return final_rows
+                
+    except Exception as e:
+        print(f"❌ CRITICAL ERROR IN DATA FETCH: {e}")
+        return []
 
     finally:
         await exchange.close()
+    
+    return final_rows
 
 # -----------------------------------------------------------------------------
 # 3. GOOGLE SHEETS UPLOADER
 # -----------------------------------------------------------------------------
-def update_google_sheet(data):
-    print("📈 Connecting to Google Sheets...")
-    
-    creds_json = os.environ.get('GCP_CREDENTIALS')
-    if not creds_json:
-        raise ValueError("❌ No GCP_CREDENTIALS found in environment variables!")
+def upload_to_sheets(data):
+    if not data:
+        print("⚠️ No data to upload!")
+        return
 
-    creds_dict = json.loads(creds_json)
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    client = gspread.authorize(creds)
+    print(f"📈 Uploading {len(data)} rows to Google Sheets...")
     
     try:
+        creds_json = os.environ.get('GCP_CREDENTIALS')
+        if not creds_json: raise ValueError("GCP_CREDENTIALS missing!")
+
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(
+            json.loads(creds_json), 
+            ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        )
+        client = gspread.authorize(creds)
         sheet = client.open(SHEET_NAME).sheet1
+
+        # HEADERS CHECK
+        HEADERS = ["Date", "Time", "Symbol", "Price", "LS_Ratio", "CVD_4h", 
+                   "Volume_24h", "Open_Interest", "Funding_Rate", "Activity_Score"]
         
-        # --- HEADER FIX ---
-        NEW_HEADERS = [
-            "Date", "Time", "Symbol", "Price", 
-            "LS_Ratio", "CVD_4h", "Volume_24h", 
-            "Open_Interest", "Funding_Rate", "Activity_Score"
-        ]
+        existing = sheet.get_all_values()
         
-        # Force update headers if they don't match
-        if not sheet.get_all_values() or sheet.row_values(1) != NEW_HEADERS:
-             print("⚠️ Headers mismatch/missing. Updating headers...")
-             if sheet.get_all_values(): sheet.delete_row(1) # Remove old header
-             sheet.insert_row(NEW_HEADERS, 1) # Insert new header
-        # ------------------
+        if not existing:
+            print("📝 Sheet is empty. Adding headers...")
+            sheet.append_row(HEADERS)
+        elif existing[0] != HEADERS:
+            print("⚠️ Header mismatch. Overwriting headers...")
+            sheet.update('A1:J1', [HEADERS]) # Force update top row
 
         sheet.append_rows(data)
-        print(f"✅ Successfully uploaded {len(data)} rows to Google Sheet!")
-        
+        print("✅ SUCCESS: Data pushed to Sheets.")
+
     except Exception as e:
-        print(f"❌ Error updating sheet: {e}")
+        print(f"❌ SHEET ERROR: {e}")
 
 if __name__ == "__main__":
     import platform
     if platform.system() == 'Windows':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    data_rows = asyncio.run(get_enriched_data())
-    
-    if data_rows:
-        update_google_sheet(data_rows)
-    else:
-        print("⚠️ No data to upload.")
+    rows = asyncio.run(main())
+    upload_to_sheets(rows)

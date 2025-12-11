@@ -7,15 +7,19 @@ import os
 import json
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import random
 
 # --- CONFIGURATION ---
 SHEET_NAME = "crypto_history" 
 TOP_N = 100
+MAX_CONCURRENT_REQUESTS = 3  # Low number to avoid 429/403 blocks
 
-# Stealth Mode Headers (To bypass API blocks)
+# Stealth Mode Headers
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.google.com/"
 }
 
 # Coins that often have '1000' prefix on Binance/Bybit
@@ -32,6 +36,7 @@ def map_kraken_to_stealth(kraken_symbol):
         if base == 'XDG': base = 'DOGE'
         
         generic = f"{base}USDT"
+        # Return tuple: (Primary, Fallback)
         if base.upper() in THOUSAND_COINS:
             return f"1000{base}USDT", generic
         return generic, None
@@ -39,18 +44,23 @@ def map_kraken_to_stealth(kraken_symbol):
         return None, None
 
 async def fetch_binance_cvd(session, symbol):
-    """Fetches CVD from Binance."""
+    """Fetches CVD from Binance with error handling."""
     url = "https://fapi.binance.com/futures/data/takerlongshortRatio"
     params = {'symbol': symbol, 'period': '4h', 'limit': 1}
     try:
-        async with session.get(url, params=params, headers=HEADERS, timeout=5) as resp:
+        async with session.get(url, params=params, headers=HEADERS, timeout=10) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 if data and isinstance(data, list):
                     buy = float(data[0]['buyVol'])
                     sell = float(data[0]['sellVol'])
                     return round(buy - sell, 0)
-    except:
+            elif resp.status == 403:
+                print(f"⚠️ Binance 403 (Blocked) for {symbol}")
+            elif resp.status == 429:
+                print(f"⚠️ Binance 429 (Rate Limit) for {symbol}")
+    except Exception as e:
+        # print(f"❌ Bin Error {symbol}: {e}") # Uncomment for deep debug
         pass
     return 0
 
@@ -66,37 +76,47 @@ async def fetch_bybit_metrics(session, symbol):
     
     try:
         # L/S Ratio
-        async with session.get(ls_url, params=ls_params, headers=HEADERS, timeout=5) as resp:
-            data = await resp.json()
-            if data['retCode'] == 0 and data['result']['list']:
-                item = data['result']['list'][0]
-                buy = float(item['buyRatio'])
-                sell = float(item['sellRatio'])
-                if sell > 0: ls_ratio = round(buy / sell, 2)
+        async with session.get(ls_url, params=ls_params, headers=HEADERS, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data['retCode'] == 0 and data['result']['list']:
+                    item = data['result']['list'][0]
+                    buy = float(item['buyRatio'])
+                    sell = float(item['sellRatio'])
+                    if sell > 0: ls_ratio = round(buy / sell, 2)
         
         # Activity
-        async with session.get(tick_url, params=tick_params, headers=HEADERS, timeout=5) as resp:
-            data = await resp.json()
-            if data['retCode'] == 0 and data['result']['list']:
-                activity = float(data['result']['list'][0].get('turnover24h', 0))
-    except:
+        async with session.get(tick_url, params=tick_params, headers=HEADERS, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                if data['retCode'] == 0 and data['result']['list']:
+                    activity = float(data['result']['list'][0].get('turnover24h', 0))
+    except Exception as e:
+        # print(f"❌ Bybit Error {symbol}: {e}")
         pass
     return ls_ratio, activity
 
-async def get_stealth_data(session, kraken_symbol):
-    """Orchestrates the stealth fetch with fallback logic."""
-    target, fallback = map_kraken_to_stealth(kraken_symbol)
-    if not target: return 0, 0, 0
+async def get_stealth_data_throttled(session, semaphore, kraken_symbol):
+    """
+    Orchestrates the fetch with a semaphore (Traffic Light) to prevent blocking.
+    """
+    async with semaphore:
+        # Add random delay to look human
+        await asyncio.sleep(random.uniform(0.1, 0.5))
+        
+        target, fallback = map_kraken_to_stealth(kraken_symbol)
+        if not target: return 0, 0, 0
 
-    cvd = await fetch_binance_cvd(session, target)
-    ls, act = await fetch_bybit_metrics(session, target)
-    
-    # Retry with fallback if failed
-    if cvd == 0 and ls == 0 and fallback:
-        cvd = await fetch_binance_cvd(session, fallback)
-        ls, act = await fetch_bybit_metrics(session, fallback)
+        # Try Primary
+        cvd = await fetch_binance_cvd(session, target)
+        ls, act = await fetch_bybit_metrics(session, target)
+        
+        # Retry with fallback if failed (e.g. PEPE vs 1000PEPE)
+        if cvd == 0 and ls == 0 and fallback:
+            cvd = await fetch_binance_cvd(session, fallback)
+            ls, act = await fetch_bybit_metrics(session, fallback)
 
-    return ls, cvd, act
+        return ls, cvd, act
 
 # -----------------------------------------------------------------------------
 # 2. MAIN DATA ENGINE
@@ -119,7 +139,6 @@ async def get_enriched_data():
             if ':USD' in symbol:
                 raw = data.get('info', {})
                 price = data.get('last')
-                
                 vol_usd = raw.get('volumeQuote')
                 if vol_usd is None:
                     vol_24h = raw.get('vol24h')
@@ -140,15 +159,28 @@ async def get_enriched_data():
                         'Funding_Rate': float(funding) * 100 if funding else 0.0
                     })
         
-        # Sort Top 100 by Volume
+        # Sort Top N by Volume
         top_coins = sorted(market_data, key=lambda x: x['Volume_24h'], reverse=True)[:TOP_N]
-        print(f"✅ Found Top {len(top_coins)} coins. Fetching Stealth Metrics...")
+        print(f"✅ Found Top {len(top_coins)} coins. Starting Stealth Fetch (Throttled)...")
 
-        # B. Fetch Stealth Metrics (Parallel)
+        # B. Fetch Stealth Metrics (Throttled)
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
         async with aiohttp.ClientSession() as session:
-            tasks = [get_stealth_data(session, coin['Symbol']) for coin in top_coins]
-            results = await asyncio.gather(*tasks)
+            tasks = [get_stealth_data_throttled(session, semaphore, coin['Symbol']) for coin in top_coins]
             
+            # Show progress
+            results = []
+            total = len(tasks)
+            for i, task in enumerate(asyncio.as_completed(tasks)):
+                res = await task
+                results.append(res)
+                if i % 10 == 0: print(f"   ...fetched {i+1}/{total}")
+            
+            # Since as_completed returns in random order, we must map back carefully
+            # Actually, simpler to just gather but use semaphore inside the task
+            # Let's re-run as gather to preserve order easily
+            results = await asyncio.gather(*[get_stealth_data_throttled(session, semaphore, coin['Symbol']) for coin in top_coins])
+
             final_rows = []
             for i, (ls, cvd, act) in enumerate(results):
                 coin = top_coins[i]
@@ -161,7 +193,6 @@ async def get_enriched_data():
                 elif cvd < 0 and coin['Funding_Rate'] > 0.02: sig = "📉 DUMP RISK"
                 
                 # D. Format Row for Sheets
-                # Columns: [Date, Time, Symbol, Price, Signal, LS_Ratio, CVD_4h, Volume, OI, Funding, Activity]
                 final_rows.append([
                     coin['Date'],
                     coin['Time'],

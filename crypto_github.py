@@ -1,7 +1,6 @@
 """
-SIMPLE WORKING SOLUTION for GitHub Actions
-Uses only Kraken data + calculated metrics (no external APIs needed)
-NO GEO-BLOCKING, NO API KEYS REQUIRED
+CLEAN DATA COLLECTOR - Just pull raw data from Kraken
+All analysis will be done in Streamlit dashboard
 """
 import asyncio
 import ccxt.async_support as ccxt
@@ -16,93 +15,17 @@ from oauth2client.service_account import ServiceAccountCredentials
 SHEET_NAME = "crypto_history" 
 TOP_N = 100
 
-# --- HELPER FUNCTIONS ---
-def calculate_momentum_score(ticker_data):
-    """
-    Calculate momentum from price change
-    Proxy for market direction
-    """
-    try:
-        raw = ticker_data.get('info', {})
-        change_pct = float(raw.get('lastChangePercentage', 0))
-        return round(change_pct, 2)
-    except:
-        return 0.0
-
-def calculate_volume_pressure(ticker_data):
-    """
-    Estimate buy/sell pressure from bid/ask sizes
-    Positive = More buyers, Negative = More sellers
-    """
-    try:
-        raw = ticker_data.get('info', {})
-        bid_size = float(raw.get('bidSize', 0))
-        ask_size = float(raw.get('askSize', 0))
-        
-        if bid_size + ask_size > 0:
-            pressure = (bid_size - ask_size) / (bid_size + ask_size) * 100
-            return round(pressure, 2)
-        return 0.0
-    except:
-        return 0.0
-
-def calculate_oi_momentum(ticker_data):
-    """
-    OI change indicates whether positions are opening or closing
-    Positive = New positions opening
-    """
-    try:
-        raw = ticker_data.get('info', {})
-        oi = float(raw.get('openInterest', 0))
-        oi_24h_ago = float(raw.get('openInterest24h', oi))  # Fallback to current if unavailable
-        
-        if oi_24h_ago > 0:
-            oi_change = ((oi - oi_24h_ago) / oi_24h_ago) * 100
-            return round(oi_change, 2)
-        return 0.0
-    except:
-        return 0.0
-
-def generate_signal(price_momentum, vol_pressure, oi_change, funding_rate):
-    """
-    Generate trading signal based on available metrics
-    Replaces L/S Ratio + CVD with Kraken-derived metrics
-    """
-    signal = "Neutral"
-    
-    # Bullish Scenarios
-    if price_momentum > 1 and vol_pressure > 10 and oi_change > 5:
-        signal = "🚀 STRONG BUY"
-    elif price_momentum > 0.5 and vol_pressure > 0 and oi_change > 0:
-        signal = "📈 BUY"
-    
-    # Bearish Scenarios
-    elif price_momentum < -1 and vol_pressure < -10 and oi_change > 5:
-        signal = "💥 DUMP RISK"
-    elif price_momentum < -0.5 and vol_pressure < 0 and oi_change > 0:
-        signal = "📉 SELL"
-    
-    # Overheated
-    elif funding_rate > 0.05 and oi_change > 10:
-        signal = "⚠️ OVERHEATED"
-    
-    # Squeeze Setup
-    elif vol_pressure > 20 and price_momentum > 0 and funding_rate < 0:
-        signal = "🔥 SQUEEZE"
-    
-    return signal
-
 # --- MAIN LOGIC ---
 async def main():
     print("\n" + "="*60)
-    print("🔥 CRYPTO DATA COLLECTOR - SIMPLE VERSION")
+    print("🔥 CRYPTO DATA COLLECTOR - RAW DATA ONLY")
     print("="*60)
-    print("✅ No external APIs - No geo-blocking - No API keys needed\n")
+    print("📊 Collecting: Price, Volume, OI, Funding Rate\n")
     
     kraken = ccxt.krakenfutures({'enableRateLimit': True})
     
     try:
-        print("🔌 Fetching Kraken data...")
+        print("🔌 Fetching Kraken tickers...")
         tickers = await kraken.fetch_tickers()
         
         market_data = []
@@ -110,62 +33,54 @@ async def main():
         date_str = now.strftime('%Y-%m-%d')
         time_str = now.strftime('%H:%M:%S')
 
+        print(f"✅ Received {len(tickers)} tickers")
+
         for symbol, data in tickers.items():
             if ':USD' in symbol:
                 raw = data.get('info', {})
                 price = data.get('last')
                 
-                # Calculate volume
+                # Get volume - try USD volume first, then coin volume
                 vol = raw.get('volumeQuote')
-                if not vol:
-                    v24 = raw.get('vol24h')
-                    if v24 and price:
-                        vol = float(v24) * price
+                if not vol or float(vol) == 0:
+                    vol = raw.get('vol24h', 0)
+                    if vol and price:
+                        vol = float(vol) * price
                 
-                if price and vol:
-                    # Calculate all metrics
-                    momentum = calculate_momentum_score(data)
-                    vol_pressure = calculate_volume_pressure(data)
-                    oi_change = calculate_oi_momentum(data)
-                    oi = float(raw.get('openInterest', 0))
-                    funding = float(raw.get('fundingRate', 0)) * 100
-                    
-                    # Generate signal
-                    signal = generate_signal(momentum, vol_pressure, oi_change, funding)
-                    
+                vol = float(vol) if vol else 0
+                
+                if price and vol > 0:
                     market_data.append({
                         'Symbol': symbol,
                         'Price': float(price),
-                        'Momentum': momentum,
-                        'Vol_Pressure': vol_pressure,
-                        'OI_Change': oi_change,
-                        'Volume': float(vol),
-                        'OI': oi,
-                        'Funding': funding,
-                        'Signal': signal
+                        'Volume_24h': vol,
+                        'Open_Interest': float(raw.get('openInterest', 0)),
+                        'Funding_Rate': float(raw.get('fundingRate', 0)) * 100  # Convert to %
                     })
 
         # Sort by volume
-        top_coins = sorted(market_data, key=lambda x: x['Volume'], reverse=True)[:TOP_N]
-        print(f"✅ Found {len(top_coins)} coins")
+        top_coins = sorted(market_data, key=lambda x: x['Volume_24h'], reverse=True)[:TOP_N]
+        
+        print(f"✅ Processed {len(top_coins)} valid coins")
         
         # Convert to rows
         final_rows = []
         for coin in top_coins:
             final_rows.append([
-                date_str, time_str, coin['Symbol'], coin['Price'],
-                coin['Momentum'], coin['Vol_Pressure'], coin['OI_Change'],
-                coin['Volume'], coin['OI'], coin['Funding'], coin['Signal']
+                date_str, 
+                time_str, 
+                coin['Symbol'], 
+                coin['Price'],
+                coin['Volume_24h'], 
+                coin['Open_Interest'], 
+                coin['Funding_Rate']
             ])
         
-        # Show top signals
-        print("\n🎯 Top Signals:")
-        signal_coins = [c for c in top_coins if c['Signal'] != "Neutral"][:5]
-        for coin in signal_coins:
-            print(f"   {coin['Symbol']}: {coin['Signal']}")
-        
-        if not signal_coins:
-            print("   No strong signals currently")
+        # Show top 5
+        print("\n📊 Top 5 by Volume:")
+        for coin in top_coins[:5]:
+            base = coin['Symbol'].split('/')[0]
+            print(f"   {base:8s} Price: ${coin['Price']:>10,.2f} | Vol: ${coin['Volume_24h']:>15,.0f} | OI: ${coin['Open_Interest']:>12,.0f}")
         
         print(f"\n✅ Total rows prepared: {len(final_rows)}")
 
@@ -200,29 +115,33 @@ def upload_to_sheets(data):
         client = gspread.authorize(creds)
         sheet = client.open(SHEET_NAME).sheet1
 
-        # Updated headers for new metrics
-        HEADERS_ROW = ["Date", "Time", "Symbol", "Price", "Momentum_%", 
-                       "Vol_Pressure", "OI_Change_%", "Volume_24h", 
-                       "Open_Interest", "Funding_Rate", "Signal"]
+        # Simple headers - just raw data
+        HEADERS_ROW = ["Date", "Time", "Symbol", "Price", "Volume_24h", 
+                       "Open_Interest", "Funding_Rate"]
         
         existing = sheet.get_all_values()
         
         if not existing:
+            print("📝 Creating new sheet with headers...")
             sheet.append_row(HEADERS_ROW)
         elif existing[0] != HEADERS_ROW:
+            print("⚠️  Updating headers...")
             sheet.delete_rows(1)
             sheet.insert_row(HEADERS_ROW, 1)
 
         sheet.append_rows(data)
-        print("✅ SUCCESS!")
+        print("✅ SUCCESS! Data uploaded to Google Sheets")
         
         # Sample
-        print("\n📊 Sample uploaded:")
+        print("\n📊 Sample uploaded (first 3 rows):")
         for row in data[:3]:
-            print(f"   {row[2]}: {row[10]} (Mom: {row[4]}%, Pressure: {row[5]})")
+            base = row[2].split('/')[0]
+            print(f"   {base:8s} ${row[3]:>10,.2f} | Vol: ${row[4]:>15,.0f}")
 
     except Exception as e:
         print(f"❌ UPLOAD ERROR: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     import platform
@@ -235,10 +154,12 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("✅ SCRIPT COMPLETED")
     print("="*60)
-    print("\n📝 Metrics Explained:")
-    print("   • Momentum: Price change % (direction)")
-    print("   • Vol Pressure: Bid/ask imbalance (buy/sell pressure)")
-    print("   • OI Change: Position growth/decline")
-    print("   • Signal: Combined interpretation")
-    print("\n💡 These metrics work WITHOUT external APIs!")
-    print("   No geo-blocking, no API keys, 100% reliable in GitHub Actions")
+    print("\n📝 Data collected:")
+    print("   • Date & Time (timestamp)")
+    print("   • Symbol")
+    print("   • Price")
+    print("   • Volume 24h (USD)")
+    print("   • Open Interest (USD)")
+    print("   • Funding Rate (%)")
+    print("\n🎨 Next: Build Streamlit dashboard for analysis!")
+    print("   Dashboard will calculate: OI %, Momentum, Signals, etc.")

@@ -12,7 +12,7 @@ import random
 # --- CONFIGURATION ---
 SHEET_NAME = "crypto_history" 
 TOP_N = 100
-MAX_CONCURRENT_REQUESTS = 5  # Limits parallel requests to avoid blocking on GitHub
+MAX_CONCURRENT_REQUESTS = 5  # Keeps us under the radar
 
 # Stealth Mode Headers
 HEADERS = {
@@ -44,7 +44,7 @@ def map_kraken_to_stealth(kraken_symbol):
         return None, None
 
 async def fetch_binance_cvd(session, symbol):
-    """Fetches CVD from Binance with error handling."""
+    """Fetches CVD from Binance."""
     url = "https://fapi.binance.com/futures/data/takerlongshortRatio"
     params = {'symbol': symbol, 'period': '4h', 'limit': 1}
     try:
@@ -54,6 +54,8 @@ async def fetch_binance_cvd(session, symbol):
                 if data and isinstance(data, list):
                     buy = float(data[0]['buyVol'])
                     sell = float(data[0]['sellVol'])
+                    # DEBUG: Print to log if we actually got data
+                    # print(f"   [Binance] {symbol} CVD Found") 
                     return round(buy - sell, 0)
     except:
         pass
@@ -92,11 +94,11 @@ async def fetch_bybit_metrics(session, symbol):
 
 async def get_stealth_data_throttled(session, semaphore, kraken_symbol):
     """
-    Orchestrates the fetch with a semaphore (Traffic Light) to prevent blocking.
+    Orchestrates the fetch with a semaphore (Traffic Light).
     """
     async with semaphore:
-        # Add random delay to look human
-        await asyncio.sleep(random.uniform(0.1, 0.5))
+        # Random delay to look human
+        await asyncio.sleep(random.uniform(0.2, 0.6))
         
         target, fallback = map_kraken_to_stealth(kraken_symbol)
         if not target: return 0, 0, 0
@@ -155,41 +157,30 @@ async def get_enriched_data():
         
         # Sort Top N by Volume
         top_coins = sorted(market_data, key=lambda x: x['Volume_24h'], reverse=True)[:TOP_N]
-        print(f"✅ Found Top {len(top_coins)} coins. Starting Stealth Fetch (Throttled)...")
+        print(f"✅ Found Top {len(top_coins)} coins. Starting Feature Fetch (Throttled)...")
 
         # B. Fetch Stealth Metrics (Throttled)
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
         async with aiohttp.ClientSession() as session:
-            # Create list of async tasks
             tasks = [get_stealth_data_throttled(session, semaphore, coin['Symbol']) for coin in top_coins]
-            
-            # Execute tasks
             results = await asyncio.gather(*tasks)
 
             final_rows = []
             for i, (ls, cvd, act) in enumerate(results):
                 coin = top_coins[i]
                 
-                # C. Calculate Signal
-                sig = "Neutral"
-                if ls > 0 and ls < 0.8 and cvd > 0: sig = "🔥 SQUEEZE (Bull)"
-                elif ls > 3.0 and cvd < 0: sig = "⚠️ TRAP (Bear)"
-                elif ls > 4.0 and cvd > 0: sig = "🚀 FOMO"
-                elif cvd < 0 and coin['Funding_Rate'] > 0.02: sig = "📉 DUMP RISK"
-                
-                # D. Format Row for Sheets
+                # Format Row for Sheets (NO SIGNAL, RAW DATA ONLY)
                 final_rows.append([
                     coin['Date'],
                     coin['Time'],
                     coin['Symbol'],
                     coin['Price'],
-                    sig,
-                    ls,
-                    cvd,
+                    ls,             # L/S Ratio
+                    cvd,            # CVD
                     coin['Volume_24h'],
                     coin['Open_Interest'],
                     coin['Funding_Rate'],
-                    act
+                    act             # Activity Score
                 ])
 
         return final_rows
@@ -215,17 +206,17 @@ def update_google_sheet(data):
     try:
         sheet = client.open(SHEET_NAME).sheet1
         
-        # Check if sheet is empty and add NEW headers
+        # Check if sheet is empty and add FEATURE headers
         if not sheet.get_all_values():
             headers = [
-                "Date", "Time", "Symbol", "Price", "Signal", 
-                "LS_Ratio", "CVD_4h", "Volume_24h", "Open_Interest", 
-                "Funding_Rate", "Activity_Score"
+                "Date", "Time", "Symbol", "Price", 
+                "LS_Ratio", "CVD_4h", "Volume_24h", 
+                "Open_Interest", "Funding_Rate", "Activity_Score"
             ]
             sheet.append_row(headers)
             
         sheet.append_rows(data)
-        print("✅ Successfully uploaded God Mode data to Google Sheet!")
+        print("✅ Successfully uploaded Feature data to Google Sheet!")
         
     except Exception as e:
         print(f"❌ Error updating sheet: {e}")

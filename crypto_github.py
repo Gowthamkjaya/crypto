@@ -12,7 +12,7 @@ import random
 # --- CONFIGURATION ---
 SHEET_NAME = "crypto_history" 
 TOP_N = 100
-MAX_CONCURRENT_REQUESTS = 3  # Low number to avoid 429/403 blocks
+MAX_CONCURRENT_REQUESTS = 5  # Limits parallel requests to avoid blocking on GitHub
 
 # Stealth Mode Headers
 HEADERS = {
@@ -55,12 +55,7 @@ async def fetch_binance_cvd(session, symbol):
                     buy = float(data[0]['buyVol'])
                     sell = float(data[0]['sellVol'])
                     return round(buy - sell, 0)
-            elif resp.status == 403:
-                print(f"⚠️ Binance 403 (Blocked) for {symbol}")
-            elif resp.status == 429:
-                print(f"⚠️ Binance 429 (Rate Limit) for {symbol}")
-    except Exception as e:
-        # print(f"❌ Bin Error {symbol}: {e}") # Uncomment for deep debug
+    except:
         pass
     return 0
 
@@ -91,8 +86,7 @@ async def fetch_bybit_metrics(session, symbol):
                 data = await resp.json()
                 if data['retCode'] == 0 and data['result']['list']:
                     activity = float(data['result']['list'][0].get('turnover24h', 0))
-    except Exception as e:
-        # print(f"❌ Bybit Error {symbol}: {e}")
+    except:
         pass
     return ls_ratio, activity
 
@@ -166,20 +160,11 @@ async def get_enriched_data():
         # B. Fetch Stealth Metrics (Throttled)
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
         async with aiohttp.ClientSession() as session:
+            # Create list of async tasks
             tasks = [get_stealth_data_throttled(session, semaphore, coin['Symbol']) for coin in top_coins]
             
-            # Show progress
-            results = []
-            total = len(tasks)
-            for i, task in enumerate(asyncio.as_completed(tasks)):
-                res = await task
-                results.append(res)
-                if i % 10 == 0: print(f"   ...fetched {i+1}/{total}")
-            
-            # Since as_completed returns in random order, we must map back carefully
-            # Actually, simpler to just gather but use semaphore inside the task
-            # Let's re-run as gather to preserve order easily
-            results = await asyncio.gather(*[get_stealth_data_throttled(session, semaphore, coin['Symbol']) for coin in top_coins])
+            # Execute tasks
+            results = await asyncio.gather(*tasks)
 
             final_rows = []
             for i, (ls, cvd, act) in enumerate(results):

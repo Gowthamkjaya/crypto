@@ -59,7 +59,7 @@ INTERVAL = 900  # 15 minutes in seconds
 NO_LOCK_WINDOW_START = 300  # Start at 5 minutes remaining
 NO_LOCK_WINDOW_END = 600    # End at 10 minutes remaining
 NO_LOCK_MIN_PRICE = 0.90    # Buy NO only if price >= 0.90
-NO_LOCK_ORDER_SIZE = 5    # Position size
+NO_LOCK_ORDER_SIZE = 7    # Position size
 
 # Exit Settings
 TAKE_PROFIT_SPREAD = 0.05  # Take profit at +6 cents from entry
@@ -507,4 +507,5 @@ class BTCMidGameBot:
 
 if __name__ == "__main__":
     bot = BTCMidGameBot()
+
     bot.run()

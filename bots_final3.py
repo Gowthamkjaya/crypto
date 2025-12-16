@@ -60,7 +60,7 @@ INTERVAL = 900  # 15 minutes in seconds
 LOCK_WINDOW_START = 300  # Start at 5 minutes remaining
 LOCK_WINDOW_END = 600    # End at 10 minutes remaining
 MIN_ENTRY_PRICE = 0.90    # Buy YES or NO only if price >= 0.90
-ORDER_SIZE = 10            # Position size
+ORDER_SIZE = 5            # Position size
 
 # Exit Settings - TRAILING STOP LOSS with DYNAMIC activation
 TAKE_PROFIT_SPREAD = 0.05   # Take profit at +5 cents from entry
@@ -460,34 +460,19 @@ class BTCMidGameBot:
         seconds_remaining = int(time_remaining % 60)
         print(f"📊 [{minutes_remaining}m {seconds_remaining}s] YES: ${yes_price:.2f} | NO: ${no_price:.2f}", end="\r")
         
-        # Determine which side to enter based on price >= 0.90
+        # Determine which side to enter - ONLY NO (DOWN) side when >= 0.90
         entry_token = None
         entry_side = None
         entry_price = None
         order_size = ORDER_SIZE
         
-        # Check both YES and NO - enter whichever is >= MIN_ENTRY_PRICE
-        # If both qualify, prefer the higher price (more confidence)
-        if yes_price >= MIN_ENTRY_PRICE and no_price >= MIN_ENTRY_PRICE:
-            # Both qualify - choose higher price
-            if yes_price >= no_price:
-                entry_token = market['yes_token']
-                entry_side = "YES"
-                entry_price = yes_price
-            else:
-                entry_token = market['no_token']
-                entry_side = "NO"
-                entry_price = no_price
-        elif yes_price >= MIN_ENTRY_PRICE:
-            entry_token = market['yes_token']
-            entry_side = "YES"
-            entry_price = yes_price
-        elif no_price >= MIN_ENTRY_PRICE:
+        # ONLY enter NO (DOWN) if it's >= MIN_ENTRY_PRICE
+        if no_price >= MIN_ENTRY_PRICE:
             entry_token = market['no_token']
-            entry_side = "NO"
+            entry_side = "NO (DOWN)"
             entry_price = no_price
         else:
-            # Neither side qualifies
+            # NO side doesn't qualify
             return "no_opportunity"
         
         print(f"\n\n{'='*60}")
@@ -601,8 +586,8 @@ class BTCMidGameBot:
     def run(self):
         """Main bot loop"""
         print(f"🚀 Bot is now running...")
-        print(f"📋 Strategy: Mid-Game Lock with DYNAMIC TRAILING STOP & AUTO-SETTLEMENT")
-        print(f"   Entry: Buy YES or NO @ ${MIN_ENTRY_PRICE:.2f}+ when 5-10min remaining")
+        print(f"📋 Strategy: Mid-Game Lock - NO (DOWN) ONLY with DYNAMIC TRAILING STOP & AUTO-SETTLEMENT")
+        print(f"   Entry: Buy NO (DOWN) @ ${MIN_ENTRY_PRICE:.2f}+ when 5-10min remaining")
         print(f"   Position size: {ORDER_SIZE} shares")
         print(f"   Take Profit: +${TAKE_PROFIT_SPREAD:.2f} (always active)")
         print(f"   Stop Loss: -${STOP_LOSS_SPREAD:.2f} initial")
@@ -685,6 +670,4 @@ class BTCMidGameBot:
 
 if __name__ == "__main__":
     bot = BTCMidGameBot()
-
     bot.run()
-

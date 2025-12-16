@@ -59,7 +59,7 @@ INTERVAL = 900  # 15 minutes in seconds
 LOCK_WINDOW_START = 300  # Start at 5 minutes remaining
 LOCK_WINDOW_END = 600    # End at 10 minutes remaining
 MIN_ENTRY_PRICE = 0.90    # Buy YES or NO only if price >= 0.90
-ORDER_SIZE = 5            # Position size
+ORDER_SIZE = 10            # Position size
 
 # Exit Settings - TRAILING STOP LOSS with DYNAMIC activation
 TAKE_PROFIT_SPREAD = 0.05   # Take profit at +5 cents from entry
@@ -684,4 +684,5 @@ class BTCMidGameBot:
 
 if __name__ == "__main__":
     bot = BTCMidGameBot()
+
     bot.run()

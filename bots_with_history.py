@@ -22,8 +22,9 @@ class OrderOptions:
 # 🛑 USER CONFIGURATION
 # ==========================================
 
-# Your private key (this controls your Polymarket account)
-PRIVATE_KEY = "0xbbd185bb356315b5f040a2af2fa28549177f3087559bb76885033e9cf8e8bf34"
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+if not PRIVATE_KEY:
+    raise ValueError("❌ PRIVATE_KEY not found in environment variables!")
 
 # Your Polymarket username/proxy address (the address shown on Polymarket)
 POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
@@ -839,4 +840,5 @@ class BTCSniper:
 
 if __name__ == "__main__":
     bot = BTCSniper()
+
     bot.run()

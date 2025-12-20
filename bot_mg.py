@@ -72,7 +72,7 @@ MG_WALLET_PERCENTAGE = 0.50  # Use 50% of wallet balance for each trade (0.50 = 
 
 # Exit Settings - SIMPLE
 MG_TAKE_PROFIT = 0.95       # Take profit at $0.95
-MG_STOP_LOSS = 0.62         # Stop loss at $0.70
+MG_STOP_LOSS = 0.57        # Stop loss at $0.70
 
 # System settings
 CHECK_INTERVAL = 2          # Check every 2 seconds
@@ -647,3 +647,4 @@ class SimpleMidGameBot:
 if __name__ == "__main__":
     bot = SimpleMidGameBot()
     bot.run()
+

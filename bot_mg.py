@@ -72,7 +72,7 @@ MG_ORDER_SIZE = 10          # Position size
 
 # Exit Settings - SIMPLE
 MG_TAKE_PROFIT = 0.95       # Take profit at $0.95
-MG_STOP_LOSS = 0.62         # Stop loss at $0.70
+MG_STOP_LOSS = 0.55         # Stop loss at $0.70
 
 # System settings
 CHECK_INTERVAL = 2          # Check every 2 seconds
@@ -632,3 +632,4 @@ class SimpleMidGameBot:
 if __name__ == "__main__":
     bot = SimpleMidGameBot()
     bot.run()
+

@@ -95,6 +95,7 @@ ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"add
 class SimpleMidGameBot:
     def __init__(self):
         print("🤖 Simple Mid-Game Trading Bot Starting...")
+        print("📉 TRADING NO (DOWN) ONLY")
         
         # 1. Setup Web3 (For Balance)
         self.w3 = Web3(Web3.HTTPProvider(RPC_URL))
@@ -349,7 +350,7 @@ class SimpleMidGameBot:
             return 0.0
 
     def execute_trade(self, market, market_start_time):
-        """Execute simple mid-game lock strategy"""
+        """Execute simple mid-game lock strategy - NO (DOWN) ONLY"""
         slug = market['slug']
         market_end_time = market_start_time + 900
         
@@ -380,48 +381,20 @@ class SimpleMidGameBot:
         seconds_remaining = int(time_remaining % 60)
         print(f"📊 [{minutes_remaining}m {seconds_remaining}s] YES: ${yes_price:.2f} (Bids: {yes_book['bid_size']:.0f}) | NO: ${no_price:.2f} (Bids: {no_book['bid_size']:.0f})", end="\r")
         
-        # Determine which side to buy based on entry criteria
-        entry_token = None
-        entry_side = None
-        entry_price = None
-        bid_size = None
+        # ONLY CHECK NO (DOWN) SIDE
+        entry_token = market['no_token']
+        entry_side = "NO"
+        entry_price = no_price
+        bid_size = no_book['bid_size']
         
-        # Check if YES qualifies
-        yes_qualifies = (MG_MIN_ENTRY_PRICE <= yes_price <= MG_MAX_ENTRY_PRICE and 
-                        yes_book['bid_size'] >= MG_MIN_BID_SIZE)
-        
-        # Check if NO qualifies
-        no_qualifies = (MG_MIN_ENTRY_PRICE <= no_price <= MG_MAX_ENTRY_PRICE and 
-                       no_book['bid_size'] >= MG_MIN_BID_SIZE)
-        
-        # Choose the side with better price if both qualify
-        if yes_qualifies and no_qualifies:
-            if yes_price <= no_price:
-                entry_token = market['yes_token']
-                entry_side = "YES"
-                entry_price = yes_price
-                bid_size = yes_book['bid_size']
-            else:
-                entry_token = market['no_token']
-                entry_side = "NO"
-                entry_price = no_price
-                bid_size = no_book['bid_size']
-        elif yes_qualifies:
-            entry_token = market['yes_token']
-            entry_side = "YES"
-            entry_price = yes_price
-            bid_size = yes_book['bid_size']
-        elif no_qualifies:
-            entry_token = market['no_token']
-            entry_side = "NO"
-            entry_price = no_price
-            bid_size = no_book['bid_size']
-        else:
+        # Check if NO qualifies based on entry criteria
+        if not (MG_MIN_ENTRY_PRICE <= no_price <= MG_MAX_ENTRY_PRICE and 
+                no_book['bid_size'] >= MG_MIN_BID_SIZE):
             return "no_opportunity"
         
         # Entry criteria met - execute trade
         print(f"\n\n{'='*60}")
-        print(f"🎯 MID-GAME ENTRY SIGNAL - {entry_side}")
+        print(f"🎯 MID-GAME ENTRY SIGNAL - {entry_side} (DOWN)")
         print(f"{'='*60}")
         print(f"Market: {market['title']}")
         print(f"Time Remaining: {minutes_remaining}m {seconds_remaining}s")
@@ -564,6 +537,7 @@ class SimpleMidGameBot:
         """Main bot loop"""
         print(f"🚀 Bot is now running...")
         print(f"\n📋 STRATEGY CONFIGURATION:")
+        print(f"   Trading Side: NO (DOWN) ONLY")
         print(f"   Entry Window: {MG_LOCK_WINDOW_START}s to {MG_LOCK_WINDOW_END}s remaining")
         print(f"   Entry Price Range: ${MG_MIN_ENTRY_PRICE:.2f} - ${MG_MAX_ENTRY_PRICE:.2f}")
         print(f"   Minimum Bid Size: {MG_MIN_BID_SIZE} shares")
@@ -657,5 +631,4 @@ class SimpleMidGameBot:
 
 if __name__ == "__main__":
     bot = SimpleMidGameBot()
-
     bot.run()

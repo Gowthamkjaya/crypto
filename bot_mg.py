@@ -68,11 +68,11 @@ MG_MAX_ENTRY_PRICE = 0.84   # Maximum entry price (strictly avoid >0.90)
 MG_MIN_BID_SIZE = 300       # Minimum liquidity required
 
 # Position sizing
-MG_ORDER_SIZE = 10          # Position size
+MG_WALLET_PERCENTAGE = 0.50  # Use 50% of wallet balance for each trade (0.50 = 50%)
 
 # Exit Settings - SIMPLE
 MG_TAKE_PROFIT = 0.95       # Take profit at $0.95
-MG_STOP_LOSS = 0.55         # Stop loss at $0.70
+MG_STOP_LOSS = 0.62         # Stop loss at $0.70
 
 # System settings
 CHECK_INTERVAL = 2          # Check every 2 seconds
@@ -392,6 +392,18 @@ class SimpleMidGameBot:
                 no_book['bid_size'] >= MG_MIN_BID_SIZE):
             return "no_opportunity"
         
+        # Calculate position size based on wallet balance
+        current_balance = self.get_balance()
+        available_to_trade = current_balance * MG_WALLET_PERCENTAGE
+        order_size = available_to_trade / entry_price
+        
+        # Round to 2 decimal places and check minimum
+        order_size = round(order_size, 2)
+        
+        if order_size < MIN_ORDER_SIZE:
+            print(f"\n⚠️ Calculated order size {order_size:.2f} is below minimum {MIN_ORDER_SIZE}")
+            return "insufficient_balance"
+        
         # Entry criteria met - execute trade
         print(f"\n\n{'='*60}")
         print(f"🎯 MID-GAME ENTRY SIGNAL - {entry_side} (DOWN)")
@@ -401,6 +413,9 @@ class SimpleMidGameBot:
         print(f"📊 YES: ${yes_price:.2f} | NO: ${no_price:.2f}")
         print(f"📈 Entry Side: {entry_side} @ ${entry_price:.2f}")
         print(f"💰 Available Liquidity (Bid Size): {bid_size:.0f} shares")
+        print(f"💵 Wallet Balance: ${current_balance:.2f}")
+        print(f"💵 Using {MG_WALLET_PERCENTAGE*100:.0f}% = ${available_to_trade:.2f}")
+        print(f"📦 Order Size: {order_size:.2f} shares")
         
         # Initialize trade data
         trade_data = {
@@ -409,12 +424,12 @@ class SimpleMidGameBot:
             'market_title': market['title'],
             'entry_side': entry_side,
             'intended_entry_price': entry_price,
-            'entry_size': MG_ORDER_SIZE,
+            'entry_size': order_size,
             'yes_price_at_entry': yes_price,
             'no_price_at_entry': no_price,
             'time_remaining_at_entry': int(time_remaining),
             'bid_size_at_entry': bid_size,
-            'balance_before': self.get_balance(),
+            'balance_before': current_balance,
             'session_trade_number': self.session_trades + 1,
         }
         
@@ -423,7 +438,7 @@ class SimpleMidGameBot:
         trade_data['entry_time'] = datetime.fromtimestamp(entry_start_time).isoformat()
         
         print(f"\n⚡ Executing ENTRY order...")
-        entry_id = self.place_market_order(entry_token, entry_price, MG_ORDER_SIZE, BUY)
+        entry_id = self.place_market_order(entry_token, entry_price, order_size, BUY)
         
         if not entry_id:
             print("❌ Entry failed")
@@ -541,7 +556,7 @@ class SimpleMidGameBot:
         print(f"   Entry Window: {MG_LOCK_WINDOW_START}s to {MG_LOCK_WINDOW_END}s remaining")
         print(f"   Entry Price Range: ${MG_MIN_ENTRY_PRICE:.2f} - ${MG_MAX_ENTRY_PRICE:.2f}")
         print(f"   Minimum Bid Size: {MG_MIN_BID_SIZE} shares")
-        print(f"   Position Size: {MG_ORDER_SIZE} shares")
+        print(f"   Position Size: {MG_WALLET_PERCENTAGE*100:.0f}% of wallet balance")
         print(f"   Take Profit: ${MG_TAKE_PROFIT:.2f}")
         print(f"   Stop Loss: ${MG_STOP_LOSS:.2f}")
         print(f"\n📊 Trade Logging: {TRADE_LOG_FILE}")
@@ -632,4 +647,3 @@ class SimpleMidGameBot:
 if __name__ == "__main__":
     bot = SimpleMidGameBot()
     bot.run()
-

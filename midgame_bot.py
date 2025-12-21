@@ -72,7 +72,7 @@ BG_WALLET_PERCENTAGE = 0.50  # Use 50% of wallet balance for each trade
 
 # Exit Settings
 BG_TAKE_PROFIT = 0.95       # Take profit at $0.95
-BG_STOP_LOSS = 0.42         # Stop loss at $0.57
+BG_STOP_LOSS = 0.57         # Stop loss at $0.57
 
 # Order execution settings
 BG_ENTRY_WAIT_TIME = 8      # Wait 8 seconds for entry fill
@@ -84,7 +84,7 @@ CHECK_INTERVAL = 1          # Check every 1 second
 MIN_ORDER_SIZE = 0.1        # Minimum order size
 
 # Trade Logging
-TRADE_LOG_FILE = "midgame_trades.csv"
+TRADE_LOG_FILE = "bidgame_trades.csv"
 ENABLE_EXCEL = True
 
 # ==========================================
@@ -459,26 +459,42 @@ class BidGameStrategyBot:
             'session_trade_number': self.session_trades + 1,
         }
         
-        # Execute entry with PRECISE limit order
+        # Execute entry with aggressive limit order (ask + slippage for immediate fill)
         entry_start_time = time.time()
         trade_data['entry_time'] = datetime.fromtimestamp(entry_start_time).isoformat()
         
-        print(f"\n⚡ Executing PRECISE ENTRY order...")
-        print(f"   Will ONLY fill at ${entry_price:.2f} or better")
+        # Calculate aggressive entry price (add slippage to ensure immediate fill)
+        aggressive_entry_price = min(entry_price + BG_MAX_SLIPPAGE, BG_MAX_ENTRY_PRICE)
+        
+        print(f"\n⚡ Executing AGGRESSIVE ENTRY order...")
+        print(f"   Market Ask: ${entry_price:.2f}")
+        print(f"   Limit Price: ${aggressive_entry_price:.2f} (ask + ${BG_MAX_SLIPPAGE:.2f} for immediate fill)")
         
         success, actual_entry_price, entry_id = self.place_strict_limit_order(
             token_id=entry_token,
-            limit_price=entry_price,
+            limit_price=aggressive_entry_price,
             size=order_size,
             side=BUY,
             wait_time=BG_ENTRY_WAIT_TIME
         )
         
         if not success:
-            print(f"❌ Entry at ${entry_price:.2f} not available within {BG_ENTRY_WAIT_TIME}s")
-            print(f"   Price may have moved above ${BG_MAX_ENTRY_PRICE:.2f} threshold")
-            
-            # Mark as attempted to prevent retry
+            print(f"❌ Entry failed - price likely moved above ${BG_MAX_ENTRY_PRICE:.2f}")
+            # Don't mark as traded yet - let it retry next cycle
+            return "entry_failed"
+        
+        # Verify we got a good fill price
+        if actual_entry_price > BG_MAX_ENTRY_PRICE:
+            print(f"⚠️ Fill price ${actual_entry_price:.2f} exceeds max ${BG_MAX_ENTRY_PRICE:.2f}")
+            print(f"   This shouldn't happen - cancelling trade")
+            # Try to sell immediately
+            self.place_strict_limit_order(
+                token_id=entry_token,
+                limit_price=actual_entry_price - 0.01,
+                size=order_size,
+                side=SELL,
+                wait_time=3
+            )
             self.traded_markets.add(slug)
             return "entry_failed"
         
@@ -517,11 +533,15 @@ class BidGameStrategyBot:
             # Check Take Profit with PRECISE order
             if current_bid >= BG_TAKE_PROFIT:
                 print(f"\n\n🚀 TAKE PROFIT TRIGGERED @ ${current_bid:.2f}!")
-                print(f"   Placing sell order at ${BG_TAKE_PROFIT:.2f}")
+                
+                # Use aggressive exit (bid - slippage for immediate fill)
+                aggressive_exit = max(BG_TAKE_PROFIT - 0.01, 0.01)
+                
+                print(f"   Market Bid: ${current_bid:.2f} → Limit: ${aggressive_exit:.2f}")
                 
                 success, exit_price, exit_id = self.place_strict_limit_order(
                     token_id=entry_token,
-                    limit_price=BG_TAKE_PROFIT,
+                    limit_price=aggressive_exit,
                     size=actual_shares_purchased,
                     side=SELL,
                     wait_time=BG_EXIT_WAIT_TIME
@@ -553,11 +573,15 @@ class BidGameStrategyBot:
             # Check Stop Loss with PRECISE order
             elif current_bid <= BG_STOP_LOSS:
                 print(f"\n\n🛑 STOP LOSS TRIGGERED @ ${current_bid:.2f}!")
-                print(f"   Placing sell order at ${BG_STOP_LOSS:.2f}")
+                
+                # Use aggressive exit (bid - slippage for immediate fill)
+                aggressive_exit = max(BG_STOP_LOSS - 0.01, 0.01)
+                
+                print(f"   Market Bid: ${current_bid:.2f} → Limit: ${aggressive_exit:.2f}")
                 
                 success, exit_price, exit_id = self.place_strict_limit_order(
                     token_id=entry_token,
-                    limit_price=BG_STOP_LOSS,
+                    limit_price=aggressive_exit,
                     size=actual_shares_purchased,
                     side=SELL,
                     wait_time=BG_EXIT_WAIT_TIME

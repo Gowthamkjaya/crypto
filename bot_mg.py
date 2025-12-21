@@ -59,7 +59,7 @@ INTERVAL = 900  # 15 minutes in seconds
 # ==========================================
 # 🎯 STRATEGY SELECTION
 # ==========================================
-ACTIVE_STRATEGY = "BOTH"  # Options: "MID_GAME", "DUMP_HEDGE", "BOTH"
+ACTIVE_STRATEGY = "DUMP_HEDGE"  # Options: "MID_GAME", "DUMP_HEDGE", "BOTH"
 
 # ==========================================
 # 🎯 MID-GAME STRATEGY SETTINGS (NO ONLY)
@@ -92,7 +92,7 @@ DH_WATCH_WINDOW_MINUTES = 2    # Watch first 2 minutes of round
 DH_DUMP_THRESHOLD = 0.15       # 15% price drop triggers entry
 DH_DUMP_TIMEFRAME = 3          # Check drop over 3 seconds
 DH_SUM_TARGET = 0.95           # leg1_price + leg2_price must be < this
-DH_SHARES_PER_LEG = 5          # Fixed shares for dump hedge strategy
+DH_SHARES_PER_LEG = 20          # Fixed shares for dump hedge strategy
 
 # ⭐ NEW: Dump hedge precise order settings
 DH_ENTRY_WAIT_TIME = 3         # Wait 3 seconds for leg fills
@@ -1123,5 +1123,6 @@ class DualStrategyBot:
 if __name__ == "__main__":
     bot = DualStrategyBot()
     bot.run()
+
 
 

@@ -70,8 +70,8 @@ DH_MAJORITY_EXIT = 0.99        # Sell majority side at $0.99
 DH_MINORITY_EXIT = 0.03        # Sell minority side at $0.03
 
 # Order execution settings
-DH_ENTRY_WAIT_TIME = 3         # Wait 3 seconds for leg fills
-DH_EXIT_WAIT_TIME = 3          # Wait 3 seconds for exit fills
+DH_ENTRY_WAIT_TIME = 8         # Wait 3 seconds for leg fills
+DH_EXIT_WAIT_TIME = 5         # Wait 3 seconds for exit fills
 DH_MAX_SLIPPAGE = 0.02         # Allow 2 cent slippage for dump hedge
 
 # System settings

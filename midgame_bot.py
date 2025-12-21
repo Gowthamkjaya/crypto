@@ -72,7 +72,7 @@ BG_WALLET_PERCENTAGE = 0.50  # Use 50% of wallet balance for each trade
 
 # Exit Settings
 BG_TAKE_PROFIT = 0.95       # Take profit at $0.95
-BG_STOP_LOSS = 0.30         # Stop loss at $0.57
+BG_STOP_LOSS = 0.42         # Stop loss at $0.57
 
 # Order execution settings
 BG_ENTRY_WAIT_TIME = 8      # Wait 8 seconds for entry fill

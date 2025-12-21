@@ -70,8 +70,8 @@ DH_MAJORITY_EXIT = 0.99        # Sell majority side at $0.99
 DH_MINORITY_EXIT = 0.03        # Sell minority side at $0.03
 
 # Order execution settings
-DH_ENTRY_WAIT_TIME = 8         # Wait 3 seconds for leg fills
-DH_EXIT_WAIT_TIME = 5         # Wait 3 seconds for exit fills
+DH_ENTRY_WAIT_TIME = 3         # Wait 3 seconds for leg fills
+DH_EXIT_WAIT_TIME = 3          # Wait 3 seconds for exit fills
 DH_MAX_SLIPPAGE = 0.02         # Allow 2 cent slippage for dump hedge
 
 # System settings
@@ -283,7 +283,7 @@ class HedgeStrategyBot:
             # Ensure price is within bounds
             limit_price = max(0.01, min(0.99, round(limit_price, 2)))
             
-            print(f"   🎯 Placing STRICT LIMIT {side} | Size: {size} | Price: ${limit_price:.2f}")
+            print(f"   🎯 Placing AGGRESSIVE LIMIT {side} | Size: {size} | Price: ${limit_price:.2f}")
             
             # Create GTC (Good-Til-Cancelled) order
             order = self.client.create_order(OrderArgs(
@@ -459,7 +459,7 @@ class HedgeStrategyBot:
         return None, None
 
     def execute_hedge_strategy(self, market, market_start_time):
-        """Execute dump hedge strategy with exit logic"""
+        """Execute dump hedge strategy with exit logic - FIXED ORDER EXECUTION"""
         slug = market['slug']
         
         # Reset for new market
@@ -495,7 +495,7 @@ class HedgeStrategyBot:
         minutes_elapsed = int(time_since_start // 60)
         seconds_elapsed = int(time_since_start % 60)
         
-        # PHASE 1: Watch for dump
+        # PHASE 1: Watch for dump and enter LEG 1
         if not self.leg1_active:
             if time_since_start > (DH_WATCH_WINDOW_MINUTES * 60):
                 return "outside_watch_window"
@@ -528,16 +528,21 @@ class HedgeStrategyBot:
                 print(f"   Using 50%: ${available_per_leg:.2f}")
                 print(f"   Shares: {leg1_size}")
                 
+                # ⭐ FIX: Use aggressive entry (ask + slippage for immediate fill)
+                aggressive_entry = min(entry_price + DH_MAX_SLIPPAGE, 0.99)
+                
+                print(f"   Market Ask: ${entry_price:.2f} → Limit: ${aggressive_entry:.2f}")
+                
                 success, actual_entry_price, entry_id = self.place_strict_limit_order(
                     token_id=entry_token,
-                    limit_price=entry_price,
+                    limit_price=aggressive_entry,
                     size=leg1_size,
                     side=BUY,
                     wait_time=DH_ENTRY_WAIT_TIME
                 )
                 
                 if not success:
-                    print(f"   ⚠️ Precise order missed, trying market order...")
+                    print(f"   ⚠️ Precise order missed, trying market order with validation...")
                     entry_id = self.place_market_order_with_validation(
                         token_id=entry_token,
                         max_price=entry_price,
@@ -570,7 +575,7 @@ class HedgeStrategyBot:
                 print(f"📦 Shares: {self.leg1_shares:.2f}")
                 print(f"\n👀 Watching for LEG 2 opportunity...")
         
-        # PHASE 2: Complete the hedge
+        # PHASE 2: Complete the hedge with LEG 2
         elif not self.hedge_complete:
             opposite_side = "NO" if self.leg1_side == "YES" else "YES"
             opposite_price = no_price if opposite_side == "NO" else yes_price
@@ -595,16 +600,21 @@ class HedgeStrategyBot:
                 print(f"\n⚡ LEG 2: BUY {opposite_side}")
                 print(f"   Shares: {leg2_size}")
                 
+                # ⭐ FIX: Use aggressive entry (ask + slippage for immediate fill)
+                aggressive_entry = min(opposite_price + DH_MAX_SLIPPAGE, 0.99)
+                
+                print(f"   Market Ask: ${opposite_price:.2f} → Limit: ${aggressive_entry:.2f}")
+                
                 success, actual_leg2_price, leg2_id = self.place_strict_limit_order(
                     token_id=opposite_token,
-                    limit_price=opposite_price,
+                    limit_price=aggressive_entry,
                     size=leg2_size,
                     side=BUY,
                     wait_time=DH_ENTRY_WAIT_TIME
                 )
                 
                 if not success:
-                    print(f"   ⚠️ Precise order missed, trying market order...")
+                    print(f"   ⚠️ Precise order missed, trying market order with validation...")
                     leg2_id = self.place_market_order_with_validation(
                         token_id=opposite_token,
                         max_price=opposite_price,
@@ -643,7 +653,7 @@ class HedgeStrategyBot:
                 print(f"   Locked Profit: ${locked_profit:.2f}")
                 print(f"\n👉 Now monitoring for exit opportunities...")
         
-        # PHASE 3: Exit the hedge
+        # PHASE 3: Exit the hedge (Majority first at $0.99, then Minority at $0.03)
         else:
             # Determine which side is majority based on current prices
             yes_bid = self.get_best_bid(market['yes_token'])
@@ -679,15 +689,20 @@ class HedgeStrategyBot:
             
             print(f"🎯 Exit Watch | Majority {majority_side}: ${majority_bid:.2f} (Target ${majority_target:.2f}) | Minority {minority_side}: ${minority_bid:.2f} (Target ${minority_target:.2f})", end="\r")
             
-            # Try to sell majority side first
+            # Try to sell majority side first at $0.99
             if majority_bid >= majority_target:
                 print(f"\n\n{'='*60}")
                 print(f"💎 MAJORITY EXIT TRIGGERED - {majority_side} @ ${majority_bid:.2f}")
                 print(f"{'='*60}")
                 
+                # ⭐ FIX: Use aggressive exit (bid - slippage for immediate fill)
+                aggressive_exit = max(majority_target - 0.01, 0.01)
+                
+                print(f"   Market Bid: ${majority_bid:.2f} → Limit: ${aggressive_exit:.2f}")
+                
                 success, exit_price, exit_id = self.place_strict_limit_order(
                     token_id=majority_token,
-                    limit_price=majority_target,
+                    limit_price=aggressive_exit,
                     size=majority_shares,
                     side=SELL,
                     wait_time=DH_EXIT_WAIT_TIME
@@ -697,7 +712,7 @@ class HedgeStrategyBot:
                     print(f"✅ MAJORITY SOLD @ ${exit_price:.2f}")
                     print(f"📦 Shares: {majority_shares:.2f}")
                     
-                    # Now wait for minority exit
+                    # Now wait for minority exit at $0.03
                     print(f"\n👉 Waiting for minority {minority_side} to reach ${minority_target:.2f}...")
                     
                     while True:
@@ -712,9 +727,14 @@ class HedgeStrategyBot:
                         if minority_bid <= minority_target:
                             print(f"\n\n💎 MINORITY EXIT TRIGGERED @ ${minority_bid:.2f}")
                             
+                            # ⭐ FIX: Use aggressive exit (bid - slippage for immediate fill)
+                            aggressive_exit = max(minority_target - 0.01, 0.01)
+                            
+                            print(f"   Market Bid: ${minority_bid:.2f} → Limit: ${aggressive_exit:.2f}")
+                            
                             success2, exit_price2, exit_id2 = self.place_strict_limit_order(
                                 token_id=minority_token,
-                                limit_price=minority_target,
+                                limit_price=aggressive_exit,
                                 size=minority_shares,
                                 side=SELL,
                                 wait_time=DH_EXIT_WAIT_TIME
@@ -785,13 +805,14 @@ class HedgeStrategyBot:
     def run(self):
         """Main bot loop"""
         print(f"🚀 Hedge Strategy Bot Running...")
-        print(f"\n💥 DUMP HEDGE STRATEGY:")
+        print(f"\n💥 DUMP HEDGE STRATEGY - ⭐ AGGRESSIVE ORDERS FOR FILLS:")
         print(f"   Watch Window: First {DH_WATCH_WINDOW_MINUTES} minutes")
         print(f"   Dump Threshold: {DH_DUMP_THRESHOLD*100:.0f}% drop in {DH_DUMP_TIMEFRAME}s")
         print(f"   Sum Target: <${DH_SUM_TARGET:.2f}")
         print(f"   Position Size: {DH_WALLET_PERCENTAGE*100:.0f}% of wallet per leg")
-        print(f"   Majority Exit: ${DH_MAJORITY_EXIT:.2f}")
-        print(f"   Minority Exit: ${DH_MINORITY_EXIT:.2f}")
+        print(f"   Entry: Ask + ${DH_MAX_SLIPPAGE:.2f} (aggressive for immediate fill)")
+        print(f"   Majority Exit: ${DH_MAJORITY_EXIT:.2f} (places at $0.98)")
+        print(f"   Minority Exit: ${DH_MINORITY_EXIT:.2f} (places at $0.02)")
         print(f"\n📊 Trade Log: {TRADE_LOG_FILE}\n")
         
         current_market = None

@@ -18,6 +18,7 @@ from collections import deque
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 if not PRIVATE_KEY:
     raise ValueError("❌ PRIVATE_KEY not found in environment variables!")
+    
 POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
 
 # Strategy Settings
@@ -108,7 +109,7 @@ class HedgeBot:
         self.leg1_side = None
         self.leg1_price = None
         self.leg1_token = None
-        self.leg1_shares = 0
+        self.leg1_shares = 0  # Will store actual filled amount
         self.leg1_stop_order_id = None
         self.current_market = None
         
@@ -202,12 +203,26 @@ class HedgeBot:
         except:
             return None
 
+    def get_filled_amount(self, order_id):
+        """Get the actual filled amount for an order"""
+        try:
+            time.sleep(0.5)  # Brief pause to let order settle
+            order = self.client.get_order(order_id)
+            if order:
+                filled = float(order.size_matched) if hasattr(order, 'size_matched') else 0
+                print(f"   📊 Order {order_id[:8]}... filled: {filled} shares")
+                return filled
+            return 0
+        except Exception as e:
+            print(f"   ⚠️ Could not verify fill amount: {e}")
+            return 0
+
     def force_buy(self, token_id, price, size):
-        """Force buy immediately with generous slippage"""
+        """Force buy immediately with generous slippage - returns (order_id, filled_amount)"""
         try:
             size = round(size, 1)
             if size < MIN_ORDER_SIZE:
-                return None
+                return None, 0
             
             limit_price = min(0.99, round(price + 0.01, 2))
             
@@ -230,29 +245,36 @@ class HedgeBot:
             if resp and len(resp) > 0:
                 order_result = resp[0]
                 
-                # Check 1: Must be successful AND have an Order ID
                 order_id = order_result.get('orderID')
                 success = order_result.get('success')
                 
-                if success and order_id and order_id != "":
-                    print(f"   ✅ FILLED (ID: {order_id})")
-                    return order_id
+                if success and order_id and str(order_id).strip() != "":
+                    # Get actual filled amount
+                    filled_amount = self.get_filled_amount(order_id)
+                    if filled_amount > 0:
+                        print(f"   ✅ FILLED {filled_amount} shares (ID: {order_id})")
+                        return order_id, filled_amount
+                    else:
+                        print(f"   ⚠️ Order filled but could not verify amount, using requested size")
+                        return order_id, size
                 else:
-                    # Capture the reason why it didn't fill
                     error_msg = order_result.get('errorMsg', 'Unknown FOK kill')
                     print(f"   ❌ FAILED TO FILL. API Response: {order_result}")
-                    return None
+                    return None, 0
             
-            return None
+            return None, 0
         except Exception as e:
             print(f"   ❌ Buy error: {e}")
-            return None
+            return None, 0
 
     def force_sell(self, token_id, price, size):
         """Force sell immediately with generous slippage"""
         try:
-            size = round(size, 1)
+            # Round down to nearest 0.1 to ensure we don't oversell
+            size = int(size * 10) / 10.0
+            
             if size < MIN_ORDER_SIZE:
+                print(f"   ⚠️ Size too small after rounding: {size}")
                 return None
             
             limit_price = max(0.01, round(price - 0.01, 2))
@@ -276,11 +298,10 @@ class HedgeBot:
             if resp and len(resp) > 0:
                 order_result = resp[0]
                 
-                # Check 1: Must be successful AND have an Order ID
                 order_id = order_result.get('orderID')
                 success = order_result.get('success')
                 
-                if success and order_id and order_id != "":
+                if success and order_id and str(order_id).strip() != "":
                     print(f"   ✅ FILLED (ID: {order_id})")
                     return order_id
                 else:
@@ -378,9 +399,9 @@ class HedgeBot:
                 
                 print(f"\n⚡ LEG 1: FORCE BUY {dump_side}")
                 
-                entry_id = self.force_buy(entry_token, entry_price, DH_SHARES_PER_LEG)
+                entry_id, actual_shares = self.force_buy(entry_token, entry_price, DH_SHARES_PER_LEG)
                 
-                if not entry_id:
+                if not entry_id or actual_shares == 0:
                     print("❌ LEG 1 entry failed")
                     return "leg1_failed"
                 
@@ -388,9 +409,10 @@ class HedgeBot:
                 self.leg1_side = dump_side
                 self.leg1_price = entry_price
                 self.leg1_token = entry_token
-                self.leg1_shares = DH_SHARES_PER_LEG
+                self.leg1_shares = actual_shares  # Store actual filled amount
                 
                 print(f"✅ LEG 1 COMPLETE @ ${entry_price:.2f}")
+                print(f"📦 Actual Shares: {actual_shares}")
                 print(f"🛡️ Stop Loss: ${DH_LEG1_STOP_LOSS:.2f}")
                 print(f"\n🔍 Watching for LEG 2 opportunity...")
         
@@ -404,6 +426,7 @@ class HedgeBot:
             leg1_bid = self.get_best_bid(self.leg1_token)
             if leg1_bid and leg1_bid <= DH_LEG1_STOP_LOSS:
                 print(f"\n\n🛑 LEG 1 STOP LOSS TRIGGERED @ ${leg1_bid:.2f}!")
+                print(f"   Selling {self.leg1_shares} shares...")
                 
                 exit_id = self.force_sell(self.leg1_token, leg1_bid, self.leg1_shares)
                 
@@ -428,28 +451,32 @@ class HedgeBot:
                 print(f"\n\n{'='*60}")
                 print(f"🎯 HEDGE OPPORTUNITY!")
                 print(f"{'='*60}")
-                print(f"LEG 1: {self.leg1_side} @ ${self.leg1_price:.2f}")
+                print(f"LEG 1: {self.leg1_side} @ ${self.leg1_price:.2f} ({self.leg1_shares} shares)")
                 print(f"LEG 2: {opposite_side} @ ${opposite_price:.2f}")
                 print(f"Combined: ${combined_cost:.2f}")
                 print(f"Profit: ~{profit_pct:.1f}%")
                 
                 print(f"\n⚡ LEG 2: FORCE BUY {opposite_side}")
                 
-                leg2_id = self.force_buy(opposite_token, opposite_price, DH_SHARES_PER_LEG)
+                # Buy same amount as leg1 to balance the hedge
+                leg2_id, leg2_actual_shares = self.force_buy(opposite_token, opposite_price, self.leg1_shares)
                 
-                if not leg2_id:
+                if not leg2_id or leg2_actual_shares == 0:
                     print("❌ LEG 2 entry failed")
                     return "leg2_failed"
                 
                 leg2_price = opposite_price
                 
                 print(f"✅ LEG 2 COMPLETE @ ${leg2_price:.2f}")
+                print(f"📦 Actual Shares: {leg2_actual_shares}")
                 print(f"\n💎 HEDGE COMPLETE! Monitoring for exit...")
                 print(f"   Exit when majority ≥ ${DH_EXIT_MAJORITY:.2f} AND minority ≤ ${DH_EXIT_MINORITY:.2f}")
                 
                 # Monitor for exit
                 leg1_token = self.leg1_token
                 leg2_token = opposite_token
+                leg1_shares = self.leg1_shares
+                leg2_shares = leg2_actual_shares
                 
                 while True:
                     time.sleep(CHECK_INTERVAL)
@@ -470,18 +497,25 @@ class HedgeBot:
                         print(f"   Majority: ${majority_price:.2f} ≥ ${DH_EXIT_MAJORITY:.2f}")
                         print(f"   Minority: ${minority_price:.2f} ≤ ${DH_EXIT_MINORITY:.2f}")
                         
-                        # Sell both legs
+                        # Sell both legs with actual share amounts
                         print(f"\n⚡ FORCE SELLING BOTH LEGS")
-                        exit1 = self.force_sell(leg1_token, leg1_bid, DH_SHARES_PER_LEG)
-                        exit2 = self.force_sell(leg2_token, leg2_bid, DH_SHARES_PER_LEG)
+                        print(f"   Leg1: {leg1_shares} shares")
+                        print(f"   Leg2: {leg2_shares} shares")
+                        
+                        exit1 = self.force_sell(leg1_token, leg1_bid, leg1_shares)
+                        exit2 = self.force_sell(leg2_token, leg2_bid, leg2_shares)
                         
                         if exit1 and exit2:
+                            # Calculate PnL using actual shares
+                            leg1_pnl = (leg1_bid - self.leg1_price) * leg1_shares
+                            leg2_pnl = (leg2_bid - leg2_price) * leg2_shares
+                            total_pnl = leg1_pnl + leg2_pnl
+                            
                             actual_combined = self.leg1_price + leg2_price
-                            pnl = (leg1_bid + leg2_bid - actual_combined) * DH_SHARES_PER_LEG
-                            pnl_pct = ((leg1_bid + leg2_bid - actual_combined) / actual_combined) * 100
+                            pnl_pct = (total_pnl / (actual_combined * min(leg1_shares, leg2_shares))) * 100
                             
                             print(f"✅ BOTH LEGS EXITED")
-                            print(f"💰 P&L: ${pnl:+.2f} ({pnl_pct:+.2f}%)")
+                            print(f"💰 P&L: ${total_pnl:+.2f} ({pnl_pct:+.2f}%)")
                             
                             trade_data = {
                                 'timestamp': datetime.now().isoformat(),
@@ -489,16 +523,16 @@ class HedgeBot:
                                 'market_title': market['title'],
                                 'leg1_side': self.leg1_side,
                                 'leg1_price': self.leg1_price,
-                                'leg1_shares': DH_SHARES_PER_LEG,
+                                'leg1_shares': leg1_shares,
                                 'leg2_side': opposite_side,
                                 'leg2_price': leg2_price,
-                                'leg2_shares': DH_SHARES_PER_LEG,
+                                'leg2_shares': leg2_shares,
                                 'combined_cost': actual_combined,
                                 'exit_price_leg1': leg1_bid,
                                 'exit_price_leg2': leg2_bid,
-                                'gross_pnl': pnl,
+                                'gross_pnl': total_pnl,
                                 'pnl_percent': pnl_pct,
-                                'win_loss': 'WIN' if pnl > 0 else 'LOSS',
+                                'win_loss': 'WIN' if total_pnl > 0 else 'LOSS',
                                 'session_trade_number': self.session_trades + 1,
                                 'balance_before': self.get_balance(),
                                 'balance_after': self.get_balance()
@@ -506,7 +540,7 @@ class HedgeBot:
                             
                             self.log_trade(trade_data)
                             
-                            if pnl > 0:
+                            if total_pnl > 0:
                                 self.session_wins += 1
                             else:
                                 self.session_losses += 1
@@ -550,16 +584,14 @@ class HedgeBot:
                         print(f"✅ Found! {current_market['title']}")
                         print(f"   Time Left: {time_left//60}m {time_left%60}s\n")
 
-                        # ⭐ ADD THIS BLOCK HERE ⭐
-                        # ===================================================
+                        # Cancel all old orders when new market detected
                         try:
                             print("🧹 New market detected! Cancelling all old orders...")
                             self.client.cancel_all()
-                            time.sleep(1) # Safety pause to let backend sync
+                            time.sleep(1)
                             print("   ✅ Wallet unlocked & ready.")
                         except Exception as e:
                             print(f"   ⚠️ Cleanup warning: {e}")
-                        # ===================================================
 
                     else:
                         next_market_time = ((current_timestamp // 900) + 1) * 900
@@ -598,7 +630,4 @@ class HedgeBot:
 
 if __name__ == "__main__":
     bot = HedgeBot()
-
     bot.run()
-
-

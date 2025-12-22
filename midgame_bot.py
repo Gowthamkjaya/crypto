@@ -14,9 +14,7 @@ import pandas as pd
 # 🔧 CONFIGURATION
 # ==========================================
 
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")
-if not PRIVATE_KEY:
-    raise ValueError("❌ PRIVATE_KEY not found in environment variables!")
+PRIVATE_KEY = "0xbbd185bb356315b5f040a2af2fa28549177f3087559bb76885033e9cf8e8bf34"
 POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
 
 # Strategy Settings
@@ -210,12 +208,26 @@ class MidGameBot:
         except:
             return None
 
+    def get_filled_amount(self, order_id):
+        """Get the actual filled amount for an order"""
+        try:
+            time.sleep(0.5)  # Brief pause to let order settle
+            order = self.client.get_order(order_id)
+            if order:
+                filled = float(order.size_matched) if hasattr(order, 'size_matched') else 0
+                print(f"   📊 Order {order_id[:8]}... filled: {filled} shares")
+                return filled
+            return 0
+        except Exception as e:
+            print(f"   ⚠️ Could not verify fill amount: {e}")
+            return 0
+
     def force_buy(self, token_id, price, size):
-        """Force buy immediately with generous slippage"""
+        """Force buy immediately with generous slippage - returns (order_id, filled_amount)"""
         try:
             size = round(size, 1)
             if size < MIN_ORDER_SIZE:
-                return None
+                return None, 0
             
             # Use generous limit to ensure fill
             limit_price = min(0.99, round(price + 0.01, 2))
@@ -239,29 +251,36 @@ class MidGameBot:
             if resp and len(resp) > 0:
                 order_result = resp[0]
                 
-                # Check 1: Must be successful AND have a valid, non-empty Order ID
                 order_id = order_result.get('orderID')
                 success = order_result.get('success')
                 
                 if success and order_id and str(order_id).strip() != "":
-                    print(f"   ✅ FILLED (ID: {order_id})")
-                    return order_id
+                    # Get actual filled amount
+                    filled_amount = self.get_filled_amount(order_id)
+                    if filled_amount > 0:
+                        print(f"   ✅ FILLED {filled_amount} shares (ID: {order_id})")
+                        return order_id, filled_amount
+                    else:
+                        print(f"   ⚠️ Order filled but could not verify amount, using requested size")
+                        return order_id, size
                 else:
-                    # Log failure details for debugging
                     error_msg = order_result.get('errorMsg', 'Unknown FOK kill')
                     print(f"   ❌ FAILED TO FILL. API Response: {order_result}")
-                    return None
+                    return None, 0
             
-            return None
+            return None, 0
         except Exception as e:
             print(f"   ❌ Buy error: {e}")
-            return None
+            return None, 0
 
     def force_sell(self, token_id, price, size):
         """Force sell immediately with generous slippage"""
         try:
-            size = round(size, 1)
+            # Round down to nearest 0.1 to ensure we don't oversell
+            size = int(size * 10) / 10.0
+            
             if size < MIN_ORDER_SIZE:
+                print(f"   ⚠️ Size too small after rounding: {size}")
                 return None
             
             # Use generous limit to ensure fill
@@ -286,7 +305,6 @@ class MidGameBot:
             if resp and len(resp) > 0:
                 order_result = resp[0]
                 
-                # Check 1: Must be successful AND have a valid, non-empty Order ID
                 order_id = order_result.get('orderID')
                 success = order_result.get('success')
                 
@@ -366,14 +384,30 @@ class MidGameBot:
             self.traded_markets.add(slug)
             return "insufficient_balance"
         
-        # Initialize trade data
+        # Execute entry
+        print(f"\n⚡ FORCE ENTERING")
+        
+        entry_id, actual_shares = self.force_buy(entry_token, entry_price, order_size)
+        
+        if not entry_id or actual_shares == 0:
+            print(f"❌ Entry failed")
+            self.traded_markets.add(slug)
+            return "entry_failed"
+        
+        print(f"✅ ENTRY FILLED @ ${entry_price:.2f}")
+        print(f"📦 Actual Shares Bought: {actual_shares}")
+        print(f"\n🎯 Targets:")
+        print(f"   Take Profit: ${MG_TAKE_PROFIT:.2f}")
+        print(f"   Stop Loss: ${MG_STOP_LOSS:.2f}")
+        
+        # Initialize trade data with actual shares
         trade_data = {
             'timestamp': datetime.now().isoformat(),
             'market_slug': slug,
             'market_title': market['title'],
             'entry_side': entry_side,
             'entry_price': entry_price,
-            'shares': order_size,
+            'shares': actual_shares,  # Use actual filled amount
             'yes_price_at_entry': yes_price,
             'no_price_at_entry': no_price,
             'time_remaining_at_entry': int(time_remaining),
@@ -381,22 +415,6 @@ class MidGameBot:
             'balance_before': current_balance,
             'session_trade_number': self.session_trades + 1,
         }
-        
-        # Execute entry
-        print(f"\n⚡ FORCE ENTERING")
-        
-        entry_id = self.force_buy(entry_token, entry_price, order_size)
-        
-        if not entry_id:
-            print(f"❌ Entry failed")
-            self.traded_markets.add(slug)
-            return "entry_failed"
-        
-        print(f"✅ ENTRY FILLED @ ${entry_price:.2f}")
-        print(f"📦 Shares: {order_size}")
-        print(f"\n🎯 Targets:")
-        print(f"   Take Profit: ${MG_TAKE_PROFIT:.2f}")
-        print(f"   Stop Loss: ${MG_STOP_LOSS:.2f}")
         
         # Monitor position
         print(f"\n💎 Monitoring...")
@@ -409,19 +427,20 @@ class MidGameBot:
             if not current_bid:
                 continue
             
-            current_pnl = (current_bid - entry_price) * order_size
+            current_pnl = (current_bid - entry_price) * actual_shares
             
             print(f"   💹 Bid: ${current_bid:.2f} | P&L: ${current_pnl:+.2f}", end="\r")
             
             # Check take profit
             if current_bid >= MG_TAKE_PROFIT:
                 print(f"\n\n🚀 TAKE PROFIT @ ${current_bid:.2f}!")
+                print(f"   Selling {actual_shares} shares...")
                 
-                exit_id = self.force_sell(entry_token, current_bid, order_size)
+                exit_id = self.force_sell(entry_token, current_bid, actual_shares)
                 
                 if exit_id:
                     exit_price = current_bid
-                    pnl = (exit_price - entry_price) * order_size
+                    pnl = (exit_price - entry_price) * actual_shares
                     pnl_pct = ((exit_price - entry_price) / entry_price) * 100
                     
                     trade_data['exit_reason'] = 'TAKE_PROFIT'
@@ -442,12 +461,13 @@ class MidGameBot:
             # Check stop loss
             elif current_bid <= MG_STOP_LOSS:
                 print(f"\n\n🛑 STOP LOSS @ ${current_bid:.2f}!")
+                print(f"   Selling {actual_shares} shares...")
                 
-                exit_id = self.force_sell(entry_token, current_bid, order_size)
+                exit_id = self.force_sell(entry_token, current_bid, actual_shares)
                 
                 if exit_id:
                     exit_price = current_bid
-                    pnl = (exit_price - entry_price) * order_size
+                    pnl = (exit_price - entry_price) * actual_shares
                     pnl_pct = ((exit_price - entry_price) / entry_price) * 100
                     
                     trade_data['exit_reason'] = 'STOP_LOSS'
@@ -495,17 +515,15 @@ class MidGameBot:
                         time_left = market_end - current_timestamp
                         print(f"✅ Found! {current_market['title']}")
                         print(f"   Time Left: {time_left//60}m {time_left%60}s\n")
-                        
-                    # ⭐ ADD THIS BLOCK HERE ⭐
-                        # ===================================================
+
+                        # Cancel all old orders when new market detected
                         try:
                             print("🧹 New market detected! Cancelling all old orders...")
                             self.client.cancel_all()
-                            time.sleep(1) # Safety pause to let backend sync
+                            time.sleep(1)
                             print("   ✅ Wallet unlocked & ready.")
                         except Exception as e:
                             print(f"   ⚠️ Cleanup warning: {e}")
-                        # ===================================================
 
                     else:
                         next_market_time = ((current_timestamp // 900) + 1) * 900
@@ -544,7 +562,4 @@ class MidGameBot:
 
 if __name__ == "__main__":
     bot = MidGameBot()
-
     bot.run()
-
-

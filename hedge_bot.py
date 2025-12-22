@@ -55,7 +55,7 @@ else:
 # System setup
 HOST = "https://clob.polymarket.com"
 CHAIN_ID = 137
-RPC_URL = "https://polygon-rpc.com"
+RPC_URL = "https://polygon-mainnet.g.alchemy.com/v2/Vwy188P6gCu8mAUrbObWH"
 USDC_E_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 USDC_CHECKSUM = Web3.to_checksum_address(USDC_E_CONTRACT)
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":true,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"type":"function"}]')
@@ -600,3 +600,4 @@ if __name__ == "__main__":
     bot = HedgeBot()
 
     bot.run()
+

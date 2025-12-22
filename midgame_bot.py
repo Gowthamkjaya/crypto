@@ -218,7 +218,7 @@ class MidGameBot:
                 return None
             
             # Use generous limit to ensure fill
-            limit_price = min(0.99, round(price + 0.05, 2))
+            limit_price = min(0.99, round(price + 0.01, 2))
             
             print(f"   ⚡ FORCE BUY | Size: {size} | Price: ${price:.2f} | Limit: ${limit_price:.2f}")
             
@@ -265,7 +265,7 @@ class MidGameBot:
                 return None
             
             # Use generous limit to ensure fill
-            limit_price = max(0.01, round(price - 0.05, 2))
+            limit_price = max(0.01, round(price - 0.01, 2))
             
             print(f"   ⚡ FORCE SELL | Size: {size} | Price: ${price:.2f} | Limit: ${limit_price:.2f}")
             
@@ -546,4 +546,5 @@ if __name__ == "__main__":
     bot = MidGameBot()
 
     bot.run()
+
 

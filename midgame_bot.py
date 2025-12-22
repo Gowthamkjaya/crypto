@@ -328,15 +328,6 @@ class MidGameBot:
         """Execute mid-game strategy - NO (DOWN) only"""
         slug = market['slug']
         market_end_time = market_start_time + 900
-
-        # Check balance
-        current_balance = self.get_balance()
-        max_cost = order_size * entry_price
-        
-        if max_cost > current_balance:
-            print(f"⚠️ Insufficient balance: ${current_balance:.2f} < ${max_cost:.2f}")
-            self.traded_markets.add(slug)
-            return "insufficient_balance"
         
         if slug in self.traded_markets:
             return "already_traded"
@@ -402,6 +393,15 @@ class MidGameBot:
         print(f"\n🎯 Targets:")
         print(f"   Take Profit: ${MG_TAKE_PROFIT:.2f}")
         print(f"   Stop Loss: ${MG_STOP_LOSS:.2f}")
+
+        # Check balance
+        current_balance = self.get_balance()
+        max_cost = order_size * entry_price
+        
+        if max_cost > current_balance:
+            print(f"⚠️ Insufficient balance: ${current_balance:.2f} < ${max_cost:.2f}")
+            self.traded_markets.add(slug)
+            return "insufficient_balance"
         
         # Initialize trade data with actual shares
         trade_data = {
@@ -566,4 +566,5 @@ class MidGameBot:
 if __name__ == "__main__":
     bot = MidGameBot()
     bot.run()
+
 

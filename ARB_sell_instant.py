@@ -24,7 +24,10 @@ class OrderOptions:
 # 🛠️ USER CONFIGURATION
 # ==========================================
 
-PRIVATE_KEY = "0xbbd185bb356315b5f040a2af2fa28549177f3087559bb76885033e9cf8e8bf34"
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+if not PRIVATE_KEY:
+    raise ValueError("❌ PRIVATE_KEY not found in environment variables!")
+
 POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
 
 wallet = Account.from_key(PRIVATE_KEY)
@@ -42,7 +45,7 @@ else:
 # ==========================================
 ENTRY_WINDOW_START = 855 # Start considering markets after 45 seconds of open 
 ENTRY_WINDOW_END = 720 # Strictly ignore markets older than this
-POSITION_SIZE = 5 
+POSITION_SIZE = 10 
 
 # Set to "LOW" to start with the side <= MAX_FIRST_BID (0.45)
 # Set to "HIGH" to start with the side >= MIN_HIGH_BID (0.55) and <= MAX_HIGH_BID (0.66)
@@ -478,4 +481,5 @@ class BTCArbitrageBot:
             time.sleep(1)
 
 if __name__ == "__main__":
+
     BTCArbitrageBot().run()

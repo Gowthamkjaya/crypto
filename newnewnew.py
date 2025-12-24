@@ -25,7 +25,7 @@ FF_MONITOR_END = 450          # Stop looking for entries at 5 minutes remaining
 FF_FAVORITE_THRESHOLD = 0.60  # Side must hit this to be "Favorite"
 FF_ENTRY_MIN = 0.50           # Buy in dip zone
 FF_ENTRY_MAX = 0.55           # Buy in dip zone
-FF_POSITION_SIZE = 15         # Shares per trade (adjust based on 2-5% of bankroll)
+FF_POSITION_SIZE = 20         # Shares per trade (adjust based on 2-5% of bankroll)
 FF_TAKE_PROFIT = 0.95         # Sell at 95 cents
 # NO STOP LOSS - Strategy requires holding to $0 if needed
 
@@ -609,5 +609,6 @@ if __name__ == "__main__":
     bot = FallenFavoriteBot()
 
     bot.run()
+
 
 

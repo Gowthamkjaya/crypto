@@ -17,18 +17,18 @@ import pandas as pd
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 if not PRIVATE_KEY:
     raise ValueError("❌ PRIVATE_KEY not found in environment variables!")
-    
+
 POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
 
 # Strategy Settings - "The Fallen Favorite"
 FF_MONITOR_START = 600        # Start monitoring at 10 minutes remaining
-FF_MONITOR_END = 450          # Stop looking for entries at 5 minutes remaining
+FF_MONITOR_END = 300          # Stop looking for entries at 5 minutes remaining
 FF_FAVORITE_THRESHOLD = 0.60  # Side must hit this to be "Favorite"
 FF_ENTRY_MIN = 0.50           # Buy in dip zone
 FF_ENTRY_MAX = 0.55           # Buy in dip zone
 FF_POSITION_SIZE = 10         # Shares per trade (adjust based on 2-5% of bankroll)
 FF_TAKE_PROFIT = 0.95         # Sell at 95 cents
-# NO STOP LOSS - Strategy requires holding to $0 if needed
+FF_STOP_LOSS = 0.24           # Exit if price drops to 24 cents
 
 # NEW: Loss Cooldown
 LOSS_COOLDOWN_SECONDS = 2700  # 45 minutes = 2700 seconds
@@ -310,7 +310,7 @@ class FallenFavoriteBot:
         2. Identify side that hits $0.60+ (the "Favorite")
         3. Wait for it to dip to $0.50-$0.55
         4. Buy the dip
-        5. Sell at $0.95 (NO stop loss - hold to $0 if needed)
+        5. Sell at $0.95 or stop loss at $0.24
         """
         slug = market['slug']
         market_end_time = market_start_time + 900
@@ -434,7 +434,7 @@ class FallenFavoriteBot:
                 print(f"Entry Price: ${current_price:.2f}")
                 print(f"Shares: {FF_POSITION_SIZE}")
                 print(f"Take Profit: ${FF_TAKE_PROFIT:.2f}")
-                print(f"Stop Loss: NONE (hold to $0)")
+                print(f"Stop Loss: ${FF_STOP_LOSS:.2f}")
                 
                 entry_id, actual_shares = self.force_buy(favorite_token, current_price, FF_POSITION_SIZE)
                 
@@ -517,6 +517,43 @@ class FallenFavoriteBot:
                     
                     print(f"   💹 Bid: ${current_bid:.2f} | Low: ${lowest_price:.2f} | P&L: ${current_pnl:+.2f}", end="\r")
                     
+                    # Check stop loss first
+                    if current_bid <= FF_STOP_LOSS:
+                        print(f"\n\n🛑 STOP LOSS HIT @ ${current_bid:.2f}!")
+                        print(f"   Selling {actual_shares} shares...")
+                        
+                        # NEW: Activate loss cooldown
+                        self.loss_cooldown_until = time.time() + LOSS_COOLDOWN_SECONDS
+                        cooldown_minutes = LOSS_COOLDOWN_SECONDS // 60
+                        
+                        exit_id = self.force_sell(favorite_token, current_bid, actual_shares)
+                        
+                        if exit_id:
+                            exit_price = current_bid
+                            pnl = (exit_price - entry_price) * actual_shares
+                            pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+                            
+                            print(f"❄️ LOSS COOLDOWN ACTIVATED: {cooldown_minutes} minutes")
+                            
+                            trade_data['exit_reason'] = 'STOP_LOSS'
+                            trade_data['exit_price'] = exit_price
+                            trade_data['lowest_price_held'] = lowest_price
+                            trade_data['gross_pnl'] = pnl
+                            trade_data['pnl_percent'] = pnl_pct
+                            trade_data['win_loss'] = 'LOSS'
+                            trade_data['balance_after'] = self.get_balance()
+                            
+                            self.log_trade(trade_data)
+                            self.session_losses += 1
+                            self.session_trades += 1
+                            self.traded_markets.add(slug)
+                            
+                            print(f"💰 P&L: ${pnl:+.2f} ({pnl_pct:+.2f}%)")
+                            print(f"📉 Lowest price held: ${lowest_price:.2f}")
+                            return "stop_loss"
+                        else:
+                            print(f"⚠️ Stop loss exit failed, continuing to monitor...")
+                    
                     # Check take profit (ONLY exit condition besides market close)
                     if current_bid >= FF_TAKE_PROFIT:
                         print(f"\n\n🚀 TAKE PROFIT @ ${current_bid:.2f}!")
@@ -559,7 +596,7 @@ class FallenFavoriteBot:
         print(f"   Entry Zone: ${FF_ENTRY_MIN:.2f} - ${FF_ENTRY_MAX:.2f}")
         print(f"   Position Size: {FF_POSITION_SIZE} shares")
         print(f"   Take Profit: ${FF_TAKE_PROFIT:.2f}")
-        print(f"   Stop Loss: NONE (hold to $0)")
+        print(f"   Stop Loss: ${FF_STOP_LOSS:.2f}")
         print(f"   Loss Cooldown: {LOSS_COOLDOWN_SECONDS // 60} minutes")
         print(f"\n📊 Logging: {TRADE_LOG_FILE}\n")
         
@@ -601,7 +638,7 @@ class FallenFavoriteBot:
                 
                 status = self.execute_fallen_favorite_strategy(current_market, market_timestamp)
                 
-                if status in ["take_profit", "market_closed"]:
+                if status in ["take_profit", "stop_loss", "market_closed"]:
                     current_balance = self.get_balance()
                     session_pnl = current_balance - self.starting_balance
                     win_rate = (self.session_wins / self.session_trades * 100) if self.session_trades > 0 else 0

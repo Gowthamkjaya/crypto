@@ -17,6 +17,7 @@ import pandas as pd
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 if not PRIVATE_KEY:
     raise ValueError("❌ PRIVATE_KEY not found in environment variables!")
+    
 POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
 
 # Strategy Settings - "The Fallen Favorite"
@@ -25,9 +26,12 @@ FF_MONITOR_END = 450          # Stop looking for entries at 5 minutes remaining
 FF_FAVORITE_THRESHOLD = 0.60  # Side must hit this to be "Favorite"
 FF_ENTRY_MIN = 0.50           # Buy in dip zone
 FF_ENTRY_MAX = 0.55           # Buy in dip zone
-FF_POSITION_SIZE = 20         # Shares per trade (adjust based on 2-5% of bankroll)
+FF_POSITION_SIZE = 10         # Shares per trade (adjust based on 2-5% of bankroll)
 FF_TAKE_PROFIT = 0.95         # Sell at 95 cents
 # NO STOP LOSS - Strategy requires holding to $0 if needed
+
+# NEW: Loss Cooldown
+LOSS_COOLDOWN_SECONDS = 2700  # 45 minutes = 2700 seconds
 
 # System Settings
 CHECK_INTERVAL = 1
@@ -102,6 +106,9 @@ class FallenFavoriteBot:
         self.session_trades = 0
         self.session_wins = 0
         self.session_losses = 0
+        
+        # NEW: Loss cooldown tracker
+        self.loss_cooldown_until = 0
         
         # Trade logging
         self.trade_logs = []
@@ -308,6 +315,15 @@ class FallenFavoriteBot:
         slug = market['slug']
         market_end_time = market_start_time + 900
         
+        # NEW: Check if in loss cooldown period
+        current_time = time.time()
+        if current_time < self.loss_cooldown_until:
+            time_left = int(self.loss_cooldown_until - current_time)
+            minutes_left = time_left // 60
+            seconds_left = time_left % 60
+            print(f"❄️ COOLDOWN ACTIVE: {minutes_left}m {seconds_left}s remaining (skipping market)", end="\r")
+            return "in_cooldown"
+        
         if slug in self.traded_markets:
             return "already_traded"
         
@@ -418,7 +434,7 @@ class FallenFavoriteBot:
                 print(f"Entry Price: ${current_price:.2f}")
                 print(f"Shares: {FF_POSITION_SIZE}")
                 print(f"Take Profit: ${FF_TAKE_PROFIT:.2f}")
-                print(f"Stop Loss: NONE (hold to $0 if needed)")
+                print(f"Stop Loss: NONE (hold to $0)")
                 
                 entry_id, actual_shares = self.force_buy(favorite_token, current_price, FF_POSITION_SIZE)
                 
@@ -466,6 +482,11 @@ class FallenFavoriteBot:
                     if time_remaining <= 0:
                         print(f"\n\n⏰ MARKET CLOSED")
                         print(f"   Position went to $0.00")
+                        
+                        # NEW: Activate loss cooldown
+                        self.loss_cooldown_until = time.time() + LOSS_COOLDOWN_SECONDS
+                        cooldown_minutes = LOSS_COOLDOWN_SECONDS // 60
+                        print(f"❄️ LOSS COOLDOWN ACTIVATED: {cooldown_minutes} minutes")
                         
                         trade_data['exit_reason'] = 'MARKET_CLOSED'
                         trade_data['exit_price'] = 0.00
@@ -539,6 +560,7 @@ class FallenFavoriteBot:
         print(f"   Position Size: {FF_POSITION_SIZE} shares")
         print(f"   Take Profit: ${FF_TAKE_PROFIT:.2f}")
         print(f"   Stop Loss: NONE (hold to $0)")
+        print(f"   Loss Cooldown: {LOSS_COOLDOWN_SECONDS // 60} minutes")
         print(f"\n📊 Logging: {TRADE_LOG_FILE}\n")
         
         current_market = None
@@ -607,8 +629,4 @@ class FallenFavoriteBot:
 
 if __name__ == "__main__":
     bot = FallenFavoriteBot()
-
     bot.run()
-
-
-

@@ -26,8 +26,8 @@ IT_ENTRY_TIME = 600              # Enter at exactly 8:00 remaining (halfway)
 IT_OBSERVATION_START = 900       # Start recording data at 15:00 remaining
 IT_MIN_PRICE = 0.65              # Minimum price floor
 IT_MAX_DRAWDOWN = 0.15           # Max distance from peak
-IT_MIN_STABILITY = 0.03          # 60% of time near highs
-IT_MIN_MOMENTUM = -0.02          # 2-minute momentum threshold
+IT_MIN_STABILITY = 0.05          # 60% of time near highs
+IT_MIN_MOMENTUM = 0.08          # 2-minute momentum threshold
 IT_MAX_ENTRY_PRICE = 0.85        # Don't chase above this
 IT_POSITION_SIZE = 7             # Shares per trade
 IT_TAKE_PROFIT = 0.96            # Victory lap exit
@@ -838,4 +838,5 @@ if __name__ == "__main__":
     bot = IronTrendBot()
 
     bot.run()
+
 

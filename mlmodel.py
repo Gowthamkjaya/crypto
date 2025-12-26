@@ -22,18 +22,18 @@ if not PRIVATE_KEY:
     
 POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
 
-# ML Strategy Settings
-ML_MODEL_PATH = "polymarket_predictor.pkl"
-ML_CONFIDENCE_THRESHOLD = 0.95  # Only trade when confidence > 85%
-ML_DATA_COLLECTION_TIME = 420   # Collect 7 minutes of data before prediction
-
 # Position Settings
-POSITION_SIZE = 5                   # Shares per trade
+MIN_ORDER_VALUE = 1.0               # Polymarket minimum: $1
+MAX_POSITION_COST = 10.0            # Maximum to risk per trade
 ENTRY_SLIPPAGE = 0.02               # Max 2 cents slippage on entry
-TAKE_PROFIT_PERCENT = 0.20          # Exit at 20% gain from entry (0.20 = 20%)
-STOP_LOSS_PERCENT = 0.40            # Stop loss at 40% loss from entry (0.40 = 40%)cls
-TRAILING_STOP = True                # Use trailing stop
-TRAILING_STOP_PERCENT = 0.15        # Trail by 15% from highest (0.15 = 15%)
+TAKE_PROFIT_PRICE = 0.96            # Fixed take profit at $0.96
+STOP_LOSS_PRICE = 0.15              # Fixed stop loss at $0.54
+TRAILING_STOP = False               # Use trailing stop
+TRAILING_STOP_PERCENT = 0.15        # Trail by 15% from peak (not used)
+
+# Market Sanity Checks
+MIN_ENTRY_PRICE = 0.65              # Don't buy if price < $0.65 (too risky/likely wrong prediction)
+MAX_ENTRY_PRICE = 0.75              # Don't buy if price > $0.75 (limited upside)
 
 # System Settings
 CHECK_INTERVAL = 1
@@ -765,21 +765,21 @@ class MLTradingBot:
         
         # Phase 5: MANAGE POSITION
         print(f"\n{'='*70}")
-        print(f"💎 MANAGING POSITION")
+        print(f"ðŸ'Ž MANAGING POSITION")
         print(f"{'='*70}")
         
-        # Calculate percentage-based targets
-        take_profit_price = min(0.99, entry_price * (1 + TAKE_PROFIT_PERCENT))
-        stop_loss_price = max(0.01, entry_price * (1 - STOP_LOSS_PERCENT))
+        # Use fixed price targets
+        take_profit_price = TAKE_PROFIT_PRICE
+        stop_loss_price = STOP_LOSS_PRICE
+        
+        tp_gain_pct = ((take_profit_price - entry_price) / entry_price) * 100
+        sl_loss_pct = ((entry_price - stop_loss_price) / entry_price) * 100
         
         print(f"Entry Price: ${entry_price:.2f}")
-        print(f"Take Profit: ${take_profit_price:.2f} (+{TAKE_PROFIT_PERCENT*100:.0f}%)")
-        print(f"Stop Loss: ${stop_loss_price:.2f} (-{STOP_LOSS_PERCENT*100:.0f}%)")
-        if TRAILING_STOP:
-            print(f"Trailing Stop: {TRAILING_STOP_PERCENT*100:.0f}% from peak")
+        print(f"Take Profit: ${take_profit_price:.2f} (+{tp_gain_pct:.1f}%)")
+        print(f"Stop Loss: ${stop_loss_price:.2f} (-{sl_loss_pct:.1f}%)")
         
         highest_bid = entry_price
-        trailing_stop_price = entry_price * (1 - TRAILING_STOP_PERCENT)
         
         while True:
             time.sleep(CHECK_INTERVAL)
@@ -841,14 +841,14 @@ class MLTradingBot:
             
             current_bid = snapshot['yes_best_bid'] if trade_side == 'YES' else snapshot['no_best_bid']
             
-            # Update highest bid and trailing stop
+            # Update highest bid for tracking
             if current_bid > highest_bid:
                 highest_bid = current_bid
-                if TRAILING_STOP:
-                    trailing_stop_price = highest_bid * (1 - TRAILING_STOP_PERCENT)
             
             current_pnl = (current_bid - entry_price) * actual_shares
+            
             current_pnl_pct = ((current_bid - entry_price) / entry_price) * 100
+            
             time_left_str = f"{int(time_remaining//60)}m {int(time_remaining%60)}s"
             
             print(f"   💹 [{time_left_str}] Bid: ${current_bid:.2f} | High: ${highest_bid:.2f} | P&L: ${current_pnl:+.2f} ({current_pnl_pct:+.1f}%)", end="\r")
@@ -881,18 +881,8 @@ class MLTradingBot:
                     return "take_profit"
             
             # Check stop loss
-            stop_triggered = False
-            stop_reason = ""
-            
             if current_bid <= stop_loss_price:
-                stop_triggered = True
-                stop_reason = "STOP_LOSS"
-            elif TRAILING_STOP and current_bid <= trailing_stop_price:
-                stop_triggered = True
-                stop_reason = "TRAILING_STOP"
-            
-            if stop_triggered:
-                print(f"\n\n🛑 {stop_reason} HIT @ ${current_bid:.2f} ({current_pnl_pct:+.1f}%)!")
+                print(f"\n\nðŸ›' STOP_LOSS HIT @ ${current_bid:.2f} ({current_pnl_pct:+.1f}%)!")
                 
                 exit_id = self.force_sell(token_to_buy, current_bid, actual_shares)
                 
@@ -901,7 +891,7 @@ class MLTradingBot:
                     pnl = (exit_price - entry_price) * actual_shares
                     pnl_pct = ((exit_price - entry_price) / entry_price) * 100
                     
-                    trade_data['exit_reason'] = stop_reason
+                    trade_data['exit_reason'] = 'STOP_LOSS'
                     trade_data['exit_price'] = exit_price
                     trade_data['highest_price'] = highest_bid
                     trade_data['gross_pnl'] = pnl
@@ -919,23 +909,22 @@ class MLTradingBot:
                     self.session_trades += 1
                     self.traded_markets.add(slug)
                     
-                    print(f"💰 P&L: ${pnl:+.2f} ({pnl_pct:+.2f}%)")
-                    print(f"📊 Peak: ${highest_bid:.2f}")
-                    return stop_reason.lower()
+                    print(f"P&L: ${pnl:+.2f} ({pnl_pct:+.2f}%)")
+                    print(f"Peak: ${highest_bid:.2f}")
+                    return "stop_loss"
     
     def run(self):
         """Main bot loop"""
-        print(f"\n🚀 ML Trading Bot Running...")
-        print(f"\n📊 STRATEGY PARAMETERS:")
+        print(f"\n ML Trading Bot Running...")
+        print(f"\n STRATEGY PARAMETERS:")
         print(f"   ML Model: {self.ml_predictor.best_model_name}")
         print(f"   Confidence Threshold: {ML_CONFIDENCE_THRESHOLD:.0%}")
         print(f"   Data Collection: {ML_DATA_COLLECTION_TIME}s (7 minutes)")
         print(f"   Position Size: {POSITION_SIZE} shares")
-        print(f"   Take Profit: +{TAKE_PROFIT_PERCENT*100:.0f}% from entry")
-        print(f"   Stop Loss: -{STOP_LOSS_PERCENT*100:.0f}% from entry")
-        if TRAILING_STOP:
-            print(f"   Trailing Stop: {TRAILING_STOP_PERCENT*100:.0f}% from peak")
-        print(f"\n💰 Starting Balance: ${self.starting_balance:.2f}\n")
+        print(f"   Entry Range: ${MIN_ENTRY_PRICE:.2f} - ${MAX_ENTRY_PRICE:.2f}")
+        print(f"   Take Profit: ${TAKE_PROFIT_PRICE:.2f} (fixed)")
+        print(f"   Stop Loss: ${STOP_LOSS_PRICE:.2f} (fixed)")
+        print(f"\n Starting Balance: ${self.starting_balance:.2f}\n")
         
         current_market = None
         
@@ -973,7 +962,7 @@ class MLTradingBot:
                 status = self.execute_ml_strategy(current_market, market_timestamp)
                 
                 # Print session stats
-                if status in ["take_profit", "stop_loss", "trailing_stop", "market_settled_win", "market_settled_loss"]:
+                if status in ["take_profit", "stop_loss", "market_settled_win", "market_settled_loss"]:
                     current_balance = self.get_balance()
                     session_pnl = current_balance - self.starting_balance
                     win_rate = (self.session_wins / self.session_trades * 100) if self.session_trades > 0 else 0

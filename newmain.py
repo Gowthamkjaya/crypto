@@ -29,9 +29,9 @@ IT_MAX_DRAWDOWN = 0.15           # Max distance from peak
 IT_MIN_STABILITY = 0.03          # 60% of time near highs
 IT_MIN_MOMENTUM = -0.02          # 2-minute momentum threshold
 IT_MAX_ENTRY_PRICE = 0.85        # Don't chase above this
-IT_POSITION_SIZE = 5             # Shares per trade
+IT_POSITION_SIZE = 7             # Shares per trade
 IT_TAKE_PROFIT = 0.96            # Victory lap exit
-IT_STOP_LOSS = 0.24              # Broken trend exit
+IT_STOP_LOSS = 0.17              # Broken trend exit
 IT_TRAILING_STOP_TRIGGER = 0.95  # Move stop to breakeven at this price
 IT_STABILITY_WINDOW = 0.05       # 5% window for stability calculation
 
@@ -838,3 +838,4 @@ if __name__ == "__main__":
     bot = IronTrendBot()
 
     bot.run()
+

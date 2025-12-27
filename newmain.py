@@ -39,7 +39,7 @@ IT_STABILITY_WINDOW = 0.05       # 5% window for stability calculation
 # System Settings
 CHECK_INTERVAL = 1
 MIN_ORDER_SIZE = 0.1
-TRADE_LOG_FILE = "iron_trend_trades.csv"
+TRADE_LOG_FILE = "iron_trend.csv"
 ENABLE_EXCEL = True
 
 # Time Filter - Pause during US market open
@@ -882,3 +882,4 @@ class IronTrendBot:
 if __name__ == "__main__":
     bot = IronTrendBot()
     bot.run()
+

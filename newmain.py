@@ -18,7 +18,7 @@ from collections import deque
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 if not PRIVATE_KEY:
     raise ValueError("❌ PRIVATE_KEY not found in environment variables!")
-    
+
 POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
 
 # Strategy Settings - "The Iron Trend"
@@ -26,12 +26,13 @@ IT_ENTRY_TIME = 600              # Enter at exactly 8:00 remaining (halfway)
 IT_OBSERVATION_START = 900       # Start recording data at 15:00 remaining
 IT_MIN_PRICE = 0.65              # Minimum price floor
 IT_MAX_DRAWDOWN = 0.15           # Max distance from peak
-IT_MIN_STABILITY = 0.05          # 60% of time near highs
+IT_MIN_STABILITY = 0.03          # 3% of time near current price (minimum)
+IT_MAX_STABILITY = 0.40          # 40% maximum - avoid overly stable markets
 IT_MIN_MOMENTUM = 0.08          # 2-minute momentum threshold
-IT_MAX_ENTRY_PRICE = 0.85        # Don't chase above this
-IT_POSITION_SIZE = 7             # Shares per trade
+IT_MAX_ENTRY_PRICE = 0.80        # Don't chase above this
+IT_POSITION_SIZE = 9             # Shares per trade
 IT_TAKE_PROFIT = 0.96            # Victory lap exit
-IT_STOP_LOSS = 0.17              # Broken trend exit
+IT_STOP_LOSS = 0.15              # Widened stop loss
 IT_TRAILING_STOP_TRIGGER = 0.95  # Move stop to breakeven at this price
 IT_STABILITY_WINDOW = 0.05       # 5% window for stability calculation
 
@@ -40,6 +41,10 @@ CHECK_INTERVAL = 1
 MIN_ORDER_SIZE = 0.1
 TRADE_LOG_FILE = "iron_trend_trades.csv"
 ENABLE_EXCEL = True
+
+# Time Filter - Pause during US market open
+PAUSE_START_HOUR = 15  # 15:00 UTC = 10:00 AM EST
+PAUSE_END_HOUR = 16    # 16:00 UTC = 11:00 AM EST
 
 # Setup addresses
 from eth_account import Account
@@ -234,6 +239,12 @@ class IronTrendBot:
         except Exception as e:
             print(f"⚠️ Error logging trade: {e}")
 
+    def is_pause_time(self):
+        """Check if current time is during the pause window (US market open)"""
+        now_utc = datetime.now(timezone.utc)
+        current_hour = now_utc.hour
+        return PAUSE_START_HOUR <= current_hour < PAUSE_END_HOUR
+
     def get_balance(self):
         try:
             raw_bal = self.usdc_contract.functions.balanceOf(TRADING_ADDRESS).call()
@@ -417,7 +428,7 @@ class IronTrendBot:
 
 
     def check_entry_criteria(self, side):
-        """Check if all 4 Iron Trend criteria are met"""
+        """Check if all Iron Trend criteria are met"""
         metrics = self.calculate_metrics(side)
 
         if metrics is None:
@@ -433,14 +444,16 @@ class IronTrendBot:
                 'checks': {}
             }
         
-        # Criterion 1: Price Floor (> $0.60)
+        # Criterion 1: Price Floor (> $0.65)
         price_check = metrics['current_price'] > IT_MIN_PRICE
         
-        # Criterion 2: Drawdown (< $0.12)
+        # Criterion 2: Drawdown (< $0.15)
         drawdown_check = metrics['drawdown'] < IT_MAX_DRAWDOWN
         
-        # Criterion 3: Stability (> 60%)
-        stability_check = metrics['stability'] > IT_MIN_STABILITY
+        # Criterion 3: Stability (between 3% and 40%)
+        stability_min_check = metrics['stability'] > IT_MIN_STABILITY
+        stability_max_check = metrics['stability'] <= IT_MAX_STABILITY
+        stability_check = stability_min_check and stability_max_check
         
         # Criterion 4: Momentum (>= -$0.02)
         momentum_check = metrics['momentum'] >= IT_MIN_MOMENTUM
@@ -456,6 +469,8 @@ class IronTrendBot:
                 'price': price_check,
                 'drawdown': drawdown_check,
                 'stability': stability_check,
+                'stability_min': stability_min_check,
+                'stability_max': stability_max_check,
                 'momentum': momentum_check,
                 'max_price': max_price_check
             }
@@ -466,14 +481,19 @@ class IronTrendBot:
         The Iron Trend Strategy:
         1. Observe 15:00 → 8:00 remaining (collect price data)
         2. At 8:00 remaining, evaluate both sides
-        3. Enter the side that passes all 4 criteria
-        4. Hold to $0.96 take profit or $0.35 stop loss
+        3. Enter the side that passes all criteria
+        4. Hold to $0.96 take profit or $0.15 stop loss
         """
         slug = market['slug']
         market_end_time = market_start_time + 900
         
         if slug in self.traded_markets:
             return "already_traded"
+        
+        # Check if we're in pause time
+        if self.is_pause_time():
+            print(f"⏸️  PAUSED - US Market Open (15:00-16:00 UTC)")
+            return "paused"
         
         # Clear history for new market
         self.price_history.clear()
@@ -514,7 +534,7 @@ class IronTrendBot:
         MIN_OBSERVATIONS = 10
 
         if len(self.price_history.timestamps) < MIN_OBSERVATIONS:
-            print("⚠️ Not enough observations — skipping market")
+            print("⚠️ Not enough observations – skipping market")
             self.traded_markets.add(slug)
             return "insufficient_data"
 
@@ -533,7 +553,12 @@ class IronTrendBot:
         print(f"YES Side Analysis:")
         print(f"  Price: ${yes_eval['metrics']['current_price']:.2f} (> ${IT_MIN_PRICE:.2f}): {'✅' if yes_eval['checks']['price'] else '❌'}")
         print(f"  Drawdown: ${yes_eval['metrics']['drawdown']:.2f} (< ${IT_MAX_DRAWDOWN:.2f}): {'✅' if yes_eval['checks']['drawdown'] else '❌'}")
-        print(f"  Stability: {yes_eval['metrics']['stability']:.1%} (> {IT_MIN_STABILITY:.0%}): {'✅' if yes_eval['checks']['stability'] else '❌'}")
+        print(f"  Stability: {yes_eval['metrics']['stability']:.1%} ({IT_MIN_STABILITY:.0%}-{IT_MAX_STABILITY:.0%}): {'✅' if yes_eval['checks']['stability'] else '❌'}")
+        if not yes_eval['checks']['stability']:
+            if not yes_eval['checks']['stability_min']:
+                print(f"    → Too low (< {IT_MIN_STABILITY:.0%})")
+            if not yes_eval['checks']['stability_max']:
+                print(f"    → Too high (> {IT_MAX_STABILITY:.0%}) - Market too stable")
         print(f"  Momentum: ${yes_eval['metrics']['momentum']:+.2f} (>= ${IT_MIN_MOMENTUM:.2f}): {'✅' if yes_eval['checks']['momentum'] else '❌'}")
         print(f"  Max Price: ${yes_eval['metrics']['current_price']:.2f} (<= ${IT_MAX_ENTRY_PRICE:.2f}): {'✅' if yes_eval['checks']['max_price'] else '❌'}")
         print(f"  Result: {'🟢 PASS' if yes_eval['pass'] else '🔴 FAIL'}\n")
@@ -541,7 +566,12 @@ class IronTrendBot:
         print(f"NO Side Analysis:")
         print(f"  Price: ${no_eval['metrics']['current_price']:.2f} (> ${IT_MIN_PRICE:.2f}): {'✅' if no_eval['checks']['price'] else '❌'}")
         print(f"  Drawdown: ${no_eval['metrics']['drawdown']:.2f} (< ${IT_MAX_DRAWDOWN:.2f}): {'✅' if no_eval['checks']['drawdown'] else '❌'}")
-        print(f"  Stability: {no_eval['metrics']['stability']:.1%} (> {IT_MIN_STABILITY:.0%}): {'✅' if no_eval['checks']['stability'] else '❌'}")
+        print(f"  Stability: {no_eval['metrics']['stability']:.1%} ({IT_MIN_STABILITY:.0%}-{IT_MAX_STABILITY:.0%}): {'✅' if no_eval['checks']['stability'] else '❌'}")
+        if not no_eval['checks']['stability']:
+            if not no_eval['checks']['stability_min']:
+                print(f"    → Too low (< {IT_MIN_STABILITY:.0%})")
+            if not no_eval['checks']['stability_max']:
+                print(f"    → Too high (> {IT_MAX_STABILITY:.0%}) - Market too stable")
         print(f"  Momentum: ${no_eval['metrics']['momentum']:+.2f} (>= ${IT_MIN_MOMENTUM:.2f}): {'✅' if no_eval['checks']['momentum'] else '❌'}")
         print(f"  Max Price: ${no_eval['metrics']['current_price']:.2f} (<= ${IT_MAX_ENTRY_PRICE:.2f}): {'✅' if no_eval['checks']['max_price'] else '❌'}")
         print(f"  Result: {'🟢 PASS' if no_eval['pass'] else '🔴 FAIL'}\n")
@@ -762,12 +792,14 @@ class IronTrendBot:
         print(f"   Min Price: ${IT_MIN_PRICE:.2f}")
         print(f"   Max Drawdown: ${IT_MAX_DRAWDOWN:.2f}")
         print(f"   Min Stability: {IT_MIN_STABILITY:.0%}")
+        print(f"   Max Stability: {IT_MAX_STABILITY:.0%} (avoid overly stable)")
         print(f"   Min Momentum: ${IT_MIN_MOMENTUM:.2f}")
         print(f"   Max Entry Price: ${IT_MAX_ENTRY_PRICE:.2f}")
         print(f"   Position Size: {IT_POSITION_SIZE} shares")
         print(f"   Take Profit: ${IT_TAKE_PROFIT:.2f}")
         print(f"   Stop Loss: ${IT_STOP_LOSS:.2f}")
         print(f"   Trailing Stop Trigger: ${IT_TRAILING_STOP_TRIGGER:.2f}")
+        print(f"   Pause Time: {PAUSE_START_HOUR}:00-{PAUSE_END_HOUR}:00 UTC (US Market Open)")
         print(f"\n📊 Logging: {TRADE_LOG_FILE}\n")
         
         current_market = None
@@ -776,6 +808,19 @@ class IronTrendBot:
             try:
                 now_utc = datetime.now(timezone.utc)
                 current_timestamp = int(now_utc.timestamp())
+                
+                # Check if we're in pause time
+                if self.is_pause_time():
+                    if not hasattr(self, '_pause_announced') or not self._pause_announced:
+                        print(f"\n⏸️  PAUSED - US Market Open (15:00-16:00 UTC / 10:00-11:00 AM EST)")
+                        print(f"   Bot will resume trading after 16:00 UTC\n")
+                        self._pause_announced = True
+                    time.sleep(60)  # Check every minute during pause
+                    continue
+                else:
+                    if hasattr(self, '_pause_announced') and self._pause_announced:
+                        print(f"\n▶️  RESUMING - US Market Open period ended\n")
+                        self._pause_announced = False
                 
                 market_timestamp = (current_timestamp // 900) * 900
                 expected_slug = f"btc-updown-15m-{market_timestamp}"
@@ -836,7 +881,4 @@ class IronTrendBot:
 
 if __name__ == "__main__":
     bot = IronTrendBot()
-
     bot.run()
-
-

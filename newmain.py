@@ -22,13 +22,14 @@ if not PRIVATE_KEY:
 POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
 
 # Strategy Settings - "The Iron Trend"
-IT_ENTRY_TIME = 600              # Enter at exactly 8:00 remaining (halfway)
+IT_ENTRY_TIME = 480              # Enter at exactly 8:00 remaining (halfway)
 IT_OBSERVATION_START = 900       # Start recording data at 15:00 remaining
 IT_MIN_PRICE = 0.65              # Minimum price floor
 IT_MAX_DRAWDOWN = 0.15           # Max distance from peak
-IT_MIN_STABILITY = 0.03          # 3% of time near current price (minimum)
+IT_MIN_STABILITY = 0.08          # 8% of time near current price (RAISED - avoid spikes)
 IT_MAX_STABILITY = 0.40          # 40% maximum - avoid overly stable markets
-IT_MIN_MOMENTUM = 0.08          # 2-minute momentum threshold
+IT_MIN_MOMENTUM = 0.08           # 2-minute momentum threshold
+IT_MAX_MOMENTUM = 0.30           # NEW: Cap momentum to avoid blow-offs
 IT_MAX_ENTRY_PRICE = 0.80        # Don't chase above this
 IT_POSITION_SIZE = 9             # Shares per trade
 IT_TAKE_PROFIT = 0.96            # Victory lap exit
@@ -36,20 +37,25 @@ IT_STOP_LOSS = 0.15              # Widened stop loss
 IT_TRAILING_STOP_TRIGGER = 0.95  # Move stop to breakeven at this price
 IT_STABILITY_WINDOW = 0.05       # 5% window for stability calculation
 
+# Order Book Ratio Settings - "Fake Support" Filter
+IT_MIN_OB_RATIO = 0.20           # Minimum OB ratio (true momentum sweet spot)
+IT_MAX_OB_RATIO = 0.60           # Maximum OB ratio (sweet spot upper bound)
+IT_OB_FAKE_SUPPORT_CAP = 0.80    # Hard cap - don't enter above this (fake support)
+
+# Golden Trading Window - Avoid US afternoon volatility
+TRADING_WINDOW_START_HOUR = 0    # Start trading at 00:00 UTC
+TRADING_WINDOW_END_HOUR = 11     # Stop trading at 11:00 UTC
+
 # System Settings
 CHECK_INTERVAL = 1
 MIN_ORDER_SIZE = 0.1
 TRADE_LOG_FILE = "iron_trend.csv"
 ENABLE_EXCEL = True
 
-# Time Filter - Pause during US market open
-PAUSE_START_HOUR = 15  # 15:00 UTC = 10:00 AM EST
-PAUSE_END_HOUR = 16    # 16:00 UTC = 11:00 AM EST
-
 # Setup addresses
 from eth_account import Account
 wallet = Account.from_key(PRIVATE_KEY)
-print(f"🔑 Private key controls: {wallet.address}")
+print(f"🔐 Private key controls: {wallet.address}")
 print(f"🦄 Polymarket shows: {POLYMARKET_ADDRESS}")
 
 if wallet.address.lower() == POLYMARKET_ADDRESS.lower():
@@ -209,7 +215,7 @@ class IronTrendBot:
                 'entry_side', 'entry_price', 'shares',
                 'yes_price_at_entry', 'no_price_at_entry',
                 'time_remaining_at_entry',
-                'drawdown', 'stability', 'momentum', 'max_price',
+                'drawdown', 'stability', 'momentum', 'max_price', 'ob_ratio',
                 'exit_reason', 'exit_price', 'lowest_price_held',
                 'gross_pnl', 'pnl_percent', 'win_loss',
                 'session_trade_number', 'balance_before', 'balance_after'
@@ -239,11 +245,11 @@ class IronTrendBot:
         except Exception as e:
             print(f"⚠️ Error logging trade: {e}")
 
-    def is_pause_time(self):
-        """Check if current time is during the pause window (US market open)"""
+    def is_trading_window(self):
+        """Check if current time is within the golden trading window (00:00-11:00 UTC)"""
         now_utc = datetime.now(timezone.utc)
         current_hour = now_utc.hour
-        return PAUSE_START_HOUR <= current_hour < PAUSE_END_HOUR
+        return TRADING_WINDOW_START_HOUR <= current_hour < TRADING_WINDOW_END_HOUR
 
     def get_balance(self):
         try:
@@ -291,6 +297,35 @@ class IronTrendBot:
             return None
         except:
             return None
+
+    def get_order_book_sizes(self, token_id):
+        """Get total bid and ask sizes from order book"""
+        try:
+            book = self.client.get_order_book(token_id)
+            
+            total_bid_size = sum(float(o.size) for o in book.bids) if book.bids else 0
+            total_ask_size = sum(float(o.size) for o in book.asks) if book.asks else 0
+            
+            return total_bid_size, total_ask_size
+        except:
+            return 0, 0
+
+    def calculate_ob_ratio(self, token_id):
+        """
+        Calculate Order Book Ratio: Bid Size / (Bid Size + Ask Size)
+        
+        Returns:
+            float: OB ratio between 0 and 1, or None if unable to calculate
+        """
+        bid_size, ask_size = self.get_order_book_sizes(token_id)
+        
+        total_size = bid_size + ask_size
+        
+        if total_size == 0:
+            return None
+        
+        ob_ratio = bid_size / total_size
+        return ob_ratio
 
     def get_filled_amount(self, order_id):
         """Get the actual filled amount for an order"""
@@ -427,7 +462,7 @@ class IronTrendBot:
         }
 
 
-    def check_entry_criteria(self, side):
+    def check_entry_criteria(self, side, token_id):
         """Check if all Iron Trend criteria are met"""
         metrics = self.calculate_metrics(side)
 
@@ -439,10 +474,15 @@ class IronTrendBot:
                     'drawdown': 0,
                     'stability': 0,
                     'momentum': 0,
-                    'max_price': 0
+                    'max_price': 0,
+                    'ob_ratio': 0
                 },
                 'checks': {}
             }
+        
+        # Calculate OB Ratio
+        ob_ratio = self.calculate_ob_ratio(token_id)
+        metrics['ob_ratio'] = ob_ratio if ob_ratio is not None else 0
         
         # Criterion 1: Price Floor (> $0.65)
         price_check = metrics['current_price'] > IT_MIN_PRICE
@@ -450,20 +490,27 @@ class IronTrendBot:
         # Criterion 2: Drawdown (< $0.15)
         drawdown_check = metrics['drawdown'] < IT_MAX_DRAWDOWN
         
-        # Criterion 3: Stability (between 3% and 40%)
+        # Criterion 3: Stability (between 8% and 40%)
         stability_min_check = metrics['stability'] > IT_MIN_STABILITY
         stability_max_check = metrics['stability'] <= IT_MAX_STABILITY
         stability_check = stability_min_check and stability_max_check
         
-        # Criterion 4: Momentum (>= -$0.02)
-        momentum_check = metrics['momentum'] >= IT_MIN_MOMENTUM
+        # Criterion 4: Momentum (>= $0.08 AND <= $0.30)
+        momentum_min_check = metrics['momentum'] >= IT_MIN_MOMENTUM
+        momentum_max_check = metrics['momentum'] <= IT_MAX_MOMENTUM
+        momentum_check = momentum_min_check and momentum_max_check
         
         # Criterion 5: Don't chase too high
         max_price_check = metrics['current_price'] <= IT_MAX_ENTRY_PRICE
         
+        # Criterion 6: OB Ratio - Avoid fake support & target sweet spot
+        ob_fake_support_check = ob_ratio is None or ob_ratio <= IT_OB_FAKE_SUPPORT_CAP
+        ob_sweet_spot_check = ob_ratio is None or (IT_MIN_OB_RATIO <= ob_ratio <= IT_MAX_OB_RATIO)
+        ob_ratio_check = ob_fake_support_check and ob_sweet_spot_check
+        
         return {
             'pass': (price_check and drawdown_check and stability_check and 
-                    momentum_check and max_price_check),
+                    momentum_check and max_price_check and ob_ratio_check),
             'metrics': metrics,
             'checks': {
                 'price': price_check,
@@ -472,7 +519,12 @@ class IronTrendBot:
                 'stability_min': stability_min_check,
                 'stability_max': stability_max_check,
                 'momentum': momentum_check,
-                'max_price': max_price_check
+                'momentum_min': momentum_min_check,
+                'momentum_max': momentum_max_check,
+                'max_price': max_price_check,
+                'ob_ratio': ob_ratio_check,
+                'ob_fake_support': ob_fake_support_check,
+                'ob_sweet_spot': ob_sweet_spot_check
             }
         }
 
@@ -490,10 +542,9 @@ class IronTrendBot:
         if slug in self.traded_markets:
             return "already_traded"
         
-        # Check if we're in pause time
-        if self.is_pause_time():
-            print(f"⏸️  PAUSED - US Market Open (15:00-16:00 UTC)")
-            return "paused"
+        # Check if we're in the golden trading window
+        if not self.is_trading_window():
+            return "outside_trading_window"
         
         # Clear history for new market
         self.price_history.clear()
@@ -547,8 +598,8 @@ class IronTrendBot:
         print(f"Evaluating entry criteria...\n")
         
         # Check both sides
-        yes_eval = self.check_entry_criteria("YES")
-        no_eval = self.check_entry_criteria("NO")
+        yes_eval = self.check_entry_criteria("YES", market['yes_token'])
+        no_eval = self.check_entry_criteria("NO", market['no_token'])
         
         print(f"YES Side Analysis:")
         print(f"  Price: ${yes_eval['metrics']['current_price']:.2f} (> ${IT_MIN_PRICE:.2f}): {'✅' if yes_eval['checks']['price'] else '❌'}")
@@ -556,11 +607,22 @@ class IronTrendBot:
         print(f"  Stability: {yes_eval['metrics']['stability']:.1%} ({IT_MIN_STABILITY:.0%}-{IT_MAX_STABILITY:.0%}): {'✅' if yes_eval['checks']['stability'] else '❌'}")
         if not yes_eval['checks']['stability']:
             if not yes_eval['checks']['stability_min']:
-                print(f"    → Too low (< {IT_MIN_STABILITY:.0%})")
+                print(f"    → Too low (< {IT_MIN_STABILITY:.0%}) - SPIKE RISK")
             if not yes_eval['checks']['stability_max']:
                 print(f"    → Too high (> {IT_MAX_STABILITY:.0%}) - Market too stable")
-        print(f"  Momentum: ${yes_eval['metrics']['momentum']:+.2f} (>= ${IT_MIN_MOMENTUM:.2f}): {'✅' if yes_eval['checks']['momentum'] else '❌'}")
+        print(f"  Momentum: ${yes_eval['metrics']['momentum']:+.2f} (${IT_MIN_MOMENTUM:.2f} to ${IT_MAX_MOMENTUM:.2f}): {'✅' if yes_eval['checks']['momentum'] else '❌'}")
+        if not yes_eval['checks']['momentum']:
+            if not yes_eval['checks']['momentum_min']:
+                print(f"    → Too low (< ${IT_MIN_MOMENTUM:.2f}) - No momentum")
+            if not yes_eval['checks']['momentum_max']:
+                print(f"    → TOO HIGH (> ${IT_MAX_MOMENTUM:.2f}) - BLOW-OFF TOP")
         print(f"  Max Price: ${yes_eval['metrics']['current_price']:.2f} (<= ${IT_MAX_ENTRY_PRICE:.2f}): {'✅' if yes_eval['checks']['max_price'] else '❌'}")
+        print(f"  OB Ratio: {yes_eval['metrics']['ob_ratio']:.2%} ({IT_MIN_OB_RATIO:.0%}-{IT_MAX_OB_RATIO:.0%}): {'✅' if yes_eval['checks']['ob_ratio'] else '❌'}")
+        if not yes_eval['checks']['ob_ratio']:
+            if not yes_eval['checks']['ob_fake_support']:
+                print(f"    → FAKE SUPPORT (> {IT_OB_FAKE_SUPPORT_CAP:.0%}) - Trap!")
+            if not yes_eval['checks']['ob_sweet_spot']:
+                print(f"    → Outside sweet spot ({IT_MIN_OB_RATIO:.0%}-{IT_MAX_OB_RATIO:.0%})")
         print(f"  Result: {'🟢 PASS' if yes_eval['pass'] else '🔴 FAIL'}\n")
         
         print(f"NO Side Analysis:")
@@ -569,11 +631,22 @@ class IronTrendBot:
         print(f"  Stability: {no_eval['metrics']['stability']:.1%} ({IT_MIN_STABILITY:.0%}-{IT_MAX_STABILITY:.0%}): {'✅' if no_eval['checks']['stability'] else '❌'}")
         if not no_eval['checks']['stability']:
             if not no_eval['checks']['stability_min']:
-                print(f"    → Too low (< {IT_MIN_STABILITY:.0%})")
+                print(f"    → Too low (< {IT_MIN_STABILITY:.0%}) - SPIKE RISK")
             if not no_eval['checks']['stability_max']:
                 print(f"    → Too high (> {IT_MAX_STABILITY:.0%}) - Market too stable")
-        print(f"  Momentum: ${no_eval['metrics']['momentum']:+.2f} (>= ${IT_MIN_MOMENTUM:.2f}): {'✅' if no_eval['checks']['momentum'] else '❌'}")
+        print(f"  Momentum: ${no_eval['metrics']['momentum']:+.2f} (${IT_MIN_MOMENTUM:.2f} to ${IT_MAX_MOMENTUM:.2f}): {'✅' if no_eval['checks']['momentum'] else '❌'}")
+        if not no_eval['checks']['momentum']:
+            if not no_eval['checks']['momentum_min']:
+                print(f"    → Too low (< ${IT_MIN_MOMENTUM:.2f}) - No momentum")
+            if not no_eval['checks']['momentum_max']:
+                print(f"    → TOO HIGH (> ${IT_MAX_MOMENTUM:.2f}) - BLOW-OFF TOP")
         print(f"  Max Price: ${no_eval['metrics']['current_price']:.2f} (<= ${IT_MAX_ENTRY_PRICE:.2f}): {'✅' if no_eval['checks']['max_price'] else '❌'}")
+        print(f"  OB Ratio: {no_eval['metrics']['ob_ratio']:.2%} ({IT_MIN_OB_RATIO:.0%}-{IT_MAX_OB_RATIO:.0%}): {'✅' if no_eval['checks']['ob_ratio'] else '❌'}")
+        if not no_eval['checks']['ob_ratio']:
+            if not no_eval['checks']['ob_fake_support']:
+                print(f"    → FAKE SUPPORT (> {IT_OB_FAKE_SUPPORT_CAP:.0%}) - Trap!")
+            if not no_eval['checks']['ob_sweet_spot']:
+                print(f"    → Outside sweet spot ({IT_MIN_OB_RATIO:.0%}-{IT_MAX_OB_RATIO:.0%})")
         print(f"  Result: {'🟢 PASS' if no_eval['pass'] else '🔴 FAIL'}\n")
         
         # Determine entry
@@ -659,6 +732,7 @@ class IronTrendBot:
             'stability': entry_eval['metrics']['stability'],
             'momentum': entry_eval['metrics']['momentum'],
             'max_price': entry_eval['metrics']['max_price'],
+            'ob_ratio': entry_eval['metrics']['ob_ratio'],
             'balance_before': current_balance,
             'session_trade_number': self.session_trades + 1,
         }
@@ -791,15 +865,21 @@ class IronTrendBot:
         print(f"   Entry Time: {IT_ENTRY_TIME}s remaining (8:00)")
         print(f"   Min Price: ${IT_MIN_PRICE:.2f}")
         print(f"   Max Drawdown: ${IT_MAX_DRAWDOWN:.2f}")
-        print(f"   Min Stability: {IT_MIN_STABILITY:.0%}")
+        print(f"   Min Stability: {IT_MIN_STABILITY:.0%} (RAISED - avoid spikes)")
         print(f"   Max Stability: {IT_MAX_STABILITY:.0%} (avoid overly stable)")
         print(f"   Min Momentum: ${IT_MIN_MOMENTUM:.2f}")
+        print(f"   Max Momentum: ${IT_MAX_MOMENTUM:.2f} (NEW - cap blow-offs)")
         print(f"   Max Entry Price: ${IT_MAX_ENTRY_PRICE:.2f}")
         print(f"   Position Size: {IT_POSITION_SIZE} shares")
         print(f"   Take Profit: ${IT_TAKE_PROFIT:.2f}")
         print(f"   Stop Loss: ${IT_STOP_LOSS:.2f}")
         print(f"   Trailing Stop Trigger: ${IT_TRAILING_STOP_TRIGGER:.2f}")
-        print(f"   Pause Time: {PAUSE_START_HOUR}:00-{PAUSE_END_HOUR}:00 UTC (US Market Open)")
+        print(f"\n📊 ORDER BOOK RATIO FILTERS:")
+        print(f"   Sweet Spot: {IT_MIN_OB_RATIO:.0%} - {IT_MAX_OB_RATIO:.0%} (true momentum)")
+        print(f"   Fake Support Cap: {IT_OB_FAKE_SUPPORT_CAP:.0%} (hard limit)")
+        print(f"\n⏰ GOLDEN TRADING WINDOW:")
+        print(f"   Active: {TRADING_WINDOW_START_HOUR:02d}:00 - {TRADING_WINDOW_END_HOUR:02d}:00 UTC")
+        print(f"   (Avoid US afternoon volatility)")
         print(f"\n📊 Logging: {TRADE_LOG_FILE}\n")
         
         current_market = None
@@ -809,18 +889,20 @@ class IronTrendBot:
                 now_utc = datetime.now(timezone.utc)
                 current_timestamp = int(now_utc.timestamp())
                 
-                # Check if we're in pause time
-                if self.is_pause_time():
-                    if not hasattr(self, '_pause_announced') or not self._pause_announced:
-                        print(f"\n⏸️  PAUSED - US Market Open (15:00-16:00 UTC / 10:00-11:00 AM EST)")
-                        print(f"   Bot will resume trading after 16:00 UTC\n")
-                        self._pause_announced = True
-                    time.sleep(60)  # Check every minute during pause
+                # Check if we're in the golden trading window
+                if not self.is_trading_window():
+                    if not hasattr(self, '_outside_window_announced') or not self._outside_window_announced:
+                        print(f"\n⛔ OUTSIDE TRADING WINDOW")
+                        print(f"   Current time: {now_utc.hour:02d}:{now_utc.minute:02d} UTC")
+                        print(f"   Golden window: {TRADING_WINDOW_START_HOUR:02d}:00-{TRADING_WINDOW_END_HOUR:02d}:00 UTC")
+                        print(f"   Bot will resume trading at {TRADING_WINDOW_START_HOUR:02d}:00 UTC\n")
+                        self._outside_window_announced = True
+                    time.sleep(60)  # Check every minute outside window
                     continue
                 else:
-                    if hasattr(self, '_pause_announced') and self._pause_announced:
-                        print(f"\n▶️  RESUMING - US Market Open period ended\n")
-                        self._pause_announced = False
+                    if hasattr(self, '_outside_window_announced') and self._outside_window_announced:
+                        print(f"\n▶️ ENTERING GOLDEN WINDOW - Trading resumed at {now_utc.hour:02d}:{now_utc.minute:02d} UTC\n")
+                        self._outside_window_announced = False
                 
                 market_timestamp = (current_timestamp // 900) * 900
                 expected_slug = f"btc-updown-15m-{market_timestamp}"
@@ -882,4 +964,3 @@ class IronTrendBot:
 if __name__ == "__main__":
     bot = IronTrendBot()
     bot.run()
-

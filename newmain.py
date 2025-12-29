@@ -31,7 +31,7 @@ IT_MAX_STABILITY = 0.40          # 40% maximum - avoid overly stable markets
 IT_MIN_MOMENTUM = 0.08           # 2-minute momentum threshold
 IT_MAX_MOMENTUM = 0.30           # NEW: Cap momentum to avoid blow-offs
 IT_MAX_ENTRY_PRICE = 0.80        # Don't chase above this
-IT_POSITION_SIZE = 9             # Shares per trade
+IT_POSITION_SIZE = 5             # Shares per trade
 IT_TAKE_PROFIT = 0.96            # Victory lap exit
 IT_STOP_LOSS = 0.15              # Widened stop loss
 IT_TRAILING_STOP_TRIGGER = 0.95  # Move stop to breakeven at this price
@@ -964,4 +964,5 @@ class IronTrendBot:
 if __name__ == "__main__":
     bot = IronTrendBot()
     bot.run()
+
 

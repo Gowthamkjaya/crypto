@@ -39,7 +39,7 @@ IT_STABILITY_WINDOW = 0.05       # 5% window for stability calculation
 
 # Order Book Ratio Settings - "Fake Support" Filter
 IT_MIN_OB_RATIO = 0.20           # Minimum OB ratio (true momentum sweet spot)
-IT_MAX_OB_RATIO = 0.60           # Maximum OB ratio (sweet spot upper bound)
+IT_MAX_OB_RATIO = 0.80           # Maximum OB ratio (sweet spot upper bound)
 IT_OB_FAKE_SUPPORT_CAP = 0.80    # Hard cap - don't enter above this (fake support)
 
 # Golden Trading Window - Avoid US afternoon volatility
@@ -964,3 +964,4 @@ class IronTrendBot:
 if __name__ == "__main__":
     bot = IronTrendBot()
     bot.run()
+

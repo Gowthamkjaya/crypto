@@ -22,7 +22,7 @@ if not PRIVATE_KEY:
 POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
 
 # Strategy Settings - "The Iron Trend"
-IT_ENTRY_TIME = 480              # Enter at exactly 8:00 remaining (halfway)
+IT_ENTRY_TIME = 420              # Enter at exactly 8:00 remaining (halfway)
 IT_OBSERVATION_START = 900       # Start recording data at 15:00 remaining
 IT_MIN_PRICE = 0.65              # Minimum price floor
 IT_MAX_DRAWDOWN = 0.15           # Max distance from peak
@@ -42,9 +42,9 @@ IT_MIN_OB_RATIO = 0.20           # Minimum OB ratio (true momentum sweet spot)
 IT_MAX_OB_RATIO = 0.80           # Maximum OB ratio (sweet spot upper bound)
 IT_OB_FAKE_SUPPORT_CAP = 0.80    # Hard cap - don't enter above this (fake support)
 
-# Golden Trading Window - Avoid US afternoon volatility
-TRADING_WINDOW_START_HOUR = 0    # Start trading at 00:00 UTC
-TRADING_WINDOW_END_HOUR = 11     # Stop trading at 11:00 UTC
+# Avoid 8 hours after US market open
+TRADING_WINDOW_START_HOUR = 21.5  # Trade resumes at 21:30 UTC (EDT)
+TRADING_WINDOW_END_HOUR   = 13.5  # Trade allowed until 13:30 UTC next day
 
 # System Settings
 CHECK_INTERVAL = 1
@@ -964,5 +964,6 @@ class IronTrendBot:
 if __name__ == "__main__":
     bot = IronTrendBot()
     bot.run()
+
 
 

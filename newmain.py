@@ -246,10 +246,17 @@ class IronTrendBot:
             print(f"⚠️ Error logging trade: {e}")
 
     def is_trading_window(self):
-        """Check if current time is within the golden trading window (00:00-11:00 UTC)"""
+        """Check if current time is within the golden trading window (22:00-14:00 UTC, wraps midnight)"""
         now_utc = datetime.now(timezone.utc)
         current_hour = now_utc.hour
-        return TRADING_WINDOW_START_HOUR <= current_hour < TRADING_WINDOW_END_HOUR
+        
+        # Handle midnight wrap: if start > end, window crosses midnight
+        if TRADING_WINDOW_START_HOUR > TRADING_WINDOW_END_HOUR:
+            # Trade if: hour >= 22 OR hour < 14
+            return current_hour >= TRADING_WINDOW_START_HOUR or current_hour < TRADING_WINDOW_END_HOUR
+        else:
+            # Normal window (no midnight wrap)
+            return TRADING_WINDOW_START_HOUR <= current_hour < TRADING_WINDOW_END_HOUR
 
     def get_balance(self):
         try:
@@ -964,6 +971,7 @@ class IronTrendBot:
 if __name__ == "__main__":
     bot = IronTrendBot()
     bot.run()
+
 
 
 

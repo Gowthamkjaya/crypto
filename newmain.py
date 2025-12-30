@@ -24,13 +24,13 @@ POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
 # Strategy Settings - "The Iron Trend"
 IT_ENTRY_TIME = 420              # Enter at exactly 8:00 remaining (halfway)
 IT_OBSERVATION_START = 900       # Start recording data at 15:00 remaining
-IT_MIN_PRICE = 0.65              # Minimum price floor
+IT_MIN_PRICE = 0.60              # Minimum price floor
 IT_MAX_DRAWDOWN = 0.15           # Max distance from peak
 IT_MIN_STABILITY = 0.08          # 8% of time near current price (RAISED - avoid spikes)
 IT_MAX_STABILITY = 0.40          # 40% maximum - avoid overly stable markets
 IT_MIN_MOMENTUM = 0.08           # 2-minute momentum threshold
 IT_MAX_MOMENTUM = 0.30           # NEW: Cap momentum to avoid blow-offs
-IT_MAX_ENTRY_PRICE = 0.80        # Don't chase above this
+IT_MAX_ENTRY_PRICE = 0.85        # Don't chase above this
 IT_POSITION_SIZE = 5             # Shares per trade
 IT_TAKE_PROFIT = 0.96            # Victory lap exit
 IT_STOP_LOSS = 0.15              # Widened stop loss
@@ -971,6 +971,7 @@ class IronTrendBot:
 if __name__ == "__main__":
     bot = IronTrendBot()
     bot.run()
+
 
 
 

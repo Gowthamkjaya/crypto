@@ -43,8 +43,8 @@ IT_MAX_OB_RATIO = 0.80           # Maximum OB ratio (sweet spot upper bound)
 IT_OB_FAKE_SUPPORT_CAP = 0.80    # Hard cap - don't enter above this (fake support)
 
 # Avoid 8 hours after US market open
-TRADING_WINDOW_START_HOUR = 21.5  # Trade resumes at 21:30 UTC (EDT)
-TRADING_WINDOW_END_HOUR   = 13.5  # Trade allowed until 13:30 UTC next day
+TRADING_WINDOW_START_HOUR = 21  # Trade resumes at 21:30 UTC (EDT)
+TRADING_WINDOW_END_HOUR   = 13  # Trade allowed until 13:30 UTC next day
 
 # System Settings
 CHECK_INTERVAL = 1

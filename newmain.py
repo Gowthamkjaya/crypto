@@ -42,9 +42,9 @@ IT_MIN_OB_RATIO = 0.20           # Minimum OB ratio (true momentum sweet spot)
 IT_MAX_OB_RATIO = 0.80           # Maximum OB ratio (sweet spot upper bound)
 IT_OB_FAKE_SUPPORT_CAP = 0.80    # Hard cap - don't enter above this (fake support)
 
-# Avoid 8 hours after US market open
-TRADING_WINDOW_START_HOUR = 21  # Trade resumes at 21:30 UTC (EDT)
-TRADING_WINDOW_END_HOUR   = 13  # Trade allowed until 13:30 UTC next day
+# Golden Trading Window - Skip first 8 hours after US markets open
+TRADING_WINDOW_START_HOUR = 22  # Start at 10:00 PM UTC (after 8hr US session + volatility)
+TRADING_WINDOW_END_HOUR = 14    # Stop at 2:00 PM UTC (before US markets open)
 
 # System Settings
 CHECK_INTERVAL = 1
@@ -964,6 +964,7 @@ class IronTrendBot:
 if __name__ == "__main__":
     bot = IronTrendBot()
     bot.run()
+
 
 
 

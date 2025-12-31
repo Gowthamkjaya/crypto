@@ -6,6 +6,7 @@ from web3 import Web3
 from py_clob_client.client import ClobClient
 from eth_account import Account
 from datetime import datetime, timezone
+import os
 
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 if not PRIVATE_KEY:
@@ -133,3 +134,4 @@ except KeyboardInterrupt:
 finally:
 
     f.close()
+

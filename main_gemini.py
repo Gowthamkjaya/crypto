@@ -312,4 +312,5 @@ class StrategyBot:
 
 if __name__ == "__main__":
     bot = StrategyBot()
+
     bot.run()

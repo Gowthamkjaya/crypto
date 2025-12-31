@@ -7,8 +7,9 @@ from py_clob_client.client import ClobClient
 from eth_account import Account
 from datetime import datetime, timezone
 
-# Configuration
-PRIVATE_KEY = "0xbbd185bb356315b5f040a2af2fa28549177f3087559bb76885033e9cf8e8bf34"
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+if not PRIVATE_KEY:
+    raise ValueError("❌ PRIVATE_KEY not found in environment variables!")
 POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
 
 wallet = Account.from_key(PRIVATE_KEY)
@@ -130,4 +131,5 @@ except KeyboardInterrupt:
     print(f"\nStopped. Data saved to {csv_file}")
 
 finally:
+
     f.close()

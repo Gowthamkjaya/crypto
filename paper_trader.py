@@ -2,37 +2,64 @@ import os
 import time
 import requests
 import json
+from web3 import Web3
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import OrderArgs, OrderType, PostOrdersArgs
+from py_clob_client.order_builder.constants import BUY, SELL
 from datetime import datetime, timezone
 import csv
+from eth_account import Account
 
 # ==========================================
-# 🔧 CONFIGURATION - PAPER TRADING MODE
+# 🔧 CONFIGURATION - LIVE TRADING
 # ==========================================
 
-# Paper Trading Settings
-PAPER_TRADING_MODE = True  # Set to False for live trading
-PAPER_TRADE_LOG = "paper_trades.csv"
+PRIVATE_KEY = "0xbbd185bb356315b5f040a2af2fa28549177f3087559bb76885033e9cf8e8bf34"
+POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
 
-# Observation & Decision Windows
+# Strategy Settings
 OBSERVATION_START = 900      # Start recording at 15:00 remaining
 DECISION_START = 540         # Start evaluating at 9:00 remaining
 DECISION_END = 360           # Latest decision at 6:00 remaining
 
-# Signal Thresholds (FIXED)
-MOMENTUM_THRESHOLD = 0.004   # Only trade when momentum > +0.004
-MIN_SIGNALS_REQUIRED = 1      # Momentum only (pure strategy)
-USE_CONFIRMATION_SIGNALS = False  # Disable - they don't help
+# Entry Criteria
+MIN_MOMENTUM = 0.050         # Momentum must be > 0.050
+MAX_MOMENTUM = 0.100         # Momentum must be < 0.100
+MAX_ENTRY_PRICE = 0.60       # Entry price ≤ $0.60
 
-# Position Management (IMPROVED)
-POSITION_SIZE = 10
-MAX_ENTRY_PRICE = 0.60       # Lowered from 0.80 for better R:R
-TAKE_PROFIT = 0.96
-STOP_LOSS = 0.55             # Raised from 0.35 to reduce losses
-TRAILING_STOP_TRIGGER = 0.90
-TRAILING_STOP_DISTANCE = 0.10
+# Position Management
+POSITION_SIZE = 5            # 5 shares per trade
+STOP_LOSS = 0.05       # Stop loss 5 cents below entry
+TAKE_PROFIT = 0.96           # Take profit at $0.96
 
 # System
 CHECK_INTERVAL = 1
+MIN_ORDER_SIZE = 0.1
+TRADE_LOG_FILE = "momentum_live.csv"
+
+# Setup addresses
+wallet = Account.from_key(PRIVATE_KEY)
+print(f"🔐 Private key controls: {wallet.address}")
+print(f"🦄 Polymarket shows: {POLYMARKET_ADDRESS}")
+
+if wallet.address.lower() == POLYMARKET_ADDRESS.lower():
+    print(f"✅ Direct match - using EOA mode")
+    USE_PROXY = False
+    SIGNATURE_TYPE = 0
+    TRADING_ADDRESS = Web3.to_checksum_address(wallet.address)
+else:
+    print(f"⚠️ Addresses differ - using proxy mode")
+    USE_PROXY = True
+    SIGNATURE_TYPE = 1
+    TRADING_ADDRESS = Web3.to_checksum_address(POLYMARKET_ADDRESS)
+
+# System setup
+HOST = "https://clob.polymarket.com"
+CHAIN_ID = 137
+RPC_URL = "https://polygon-mainnet.g.alchemy.com/v2/Vwy188P6gCu8mAUrbObWH"
+USDC_E_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+USDC_CHECKSUM = Web3.to_checksum_address(USDC_E_CONTRACT)
+ERC20_ABI = json.loads('[{"constant":true,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"},{"constant":true,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"type":"function"}]')
 
 # ==========================================
 # PRICE HISTORY TRACKER
@@ -50,7 +77,6 @@ class PriceHistory:
         self.no_prices.append(no_price)
     
     def get_period_average(self, start_time, end_time, side="YES"):
-        """Get average price for a time period"""
         prices = []
         price_list = self.yes_prices if side == "YES" else self.no_prices
         
@@ -63,7 +89,6 @@ class PriceHistory:
         return sum(prices) / len(prices)
     
     def calculate_momentum(self, side="YES"):
-        """Calculate momentum: mid_avg - early_avg"""
         early_avg = self.get_period_average(900, 720, side)
         mid_avg = self.get_period_average(720, 540, side)
         
@@ -79,51 +104,86 @@ class PriceHistory:
         self.no_prices.clear()
 
 # ==========================================
-# PAPER TRADING BOT
+# LIVE TRADING BOT
 # ==========================================
 
-class PaperTradingBot:
+class MomentumLiveBot:
     def __init__(self):
         print("\n" + "="*80)
-        print("📝 PAPER TRADING MODE - Momentum Strategy")
+        print("🚀 LIVE TRADING - Momentum Strategy")
         print("="*80)
-        print("\n💡 This bot will SIMULATE trades without placing real orders")
-        print("   It will show you what WOULD have happened\n")
+        print("\n⚠️  REAL MONEY AT RISK - Trading with real funds")
+        
+        # Setup Web3
+        self.w3 = Web3(Web3.HTTPProvider(RPC_URL))
+        self.usdc_contract = self.w3.eth.contract(address=USDC_CHECKSUM, abi=ERC20_ABI)
+        
+        # Setup ClobClient
+        print(f"\n🔗 Connecting to Polymarket...")
+        try:
+            if USE_PROXY:
+                self.client = ClobClient(
+                    host=HOST,
+                    key=PRIVATE_KEY,
+                    chain_id=CHAIN_ID,
+                    signature_type=SIGNATURE_TYPE,
+                    funder=TRADING_ADDRESS
+                )
+            else:
+                self.client = ClobClient(
+                    host=HOST,
+                    key=PRIVATE_KEY,
+                    chain_id=CHAIN_ID
+                )
+            
+            api_creds = self.client.create_or_derive_api_creds()
+            self.client.set_api_creds(api_creds)
+            print(f"✅ Trading as: {self.client.get_address()}")
+        except Exception as e:
+            print(f"❌ Connection failed: {e}")
+            exit()
+        
+        # Get balance
+        self.starting_balance = self.get_balance()
+        print(f"💰 Starting Balance: ${self.starting_balance:.2f}\n")
         
         self.traded_markets = set()
         self.session_trades = 0
         self.session_wins = 0
         self.session_losses = 0
-        self.session_pnl = 0
-        
         self.price_history = PriceHistory()
+        
         self.initialize_log()
     
     def initialize_log(self):
-        if not os.path.exists(PAPER_TRADE_LOG):
+        if not os.path.exists(TRADE_LOG_FILE):
             headers = [
                 'timestamp', 'market_slug', 'market_title',
-                'entry_side', 'entry_price', 'shares',
+                'entry_side', 'entry_price', 'shares', 'order_id',
                 'yes_momentum', 'no_momentum',
-                'yes_early', 'yes_mid', 'no_early', 'no_mid',
-                'signal_valid', 'signals_count',
-                'time_remaining_at_entry',
-                'exit_reason', 'exit_price', 'exit_time_remaining',
-                'highest_price', 'lowest_price',
+                'exit_reason', 'exit_price', 'exit_order_id',
                 'gross_pnl', 'pnl_percent', 'win_loss',
-                'risk_reward_ratio'
+                'balance_before', 'balance_after'
             ]
             
-            with open(PAPER_TRADE_LOG, 'w', newline='') as f:
+            with open(TRADE_LOG_FILE, 'w', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=headers)
                 writer.writeheader()
             
-            print(f"📊 Paper trade log: {PAPER_TRADE_LOG}\n")
+            print(f"📊 Trade log: {TRADE_LOG_FILE}\n")
     
     def log_trade(self, trade_data):
-        with open(PAPER_TRADE_LOG, 'a', newline='') as f:
+        with open(TRADE_LOG_FILE, 'a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=trade_data.keys())
             writer.writerow(trade_data)
+    
+    def get_balance(self):
+        try:
+            raw_bal = self.usdc_contract.functions.balanceOf(TRADING_ADDRESS).call()
+            decimals = self.usdc_contract.functions.decimals().call()
+            return raw_bal / (10 ** decimals)
+        except:
+            return 0.0
     
     def get_market_from_slug(self, slug):
         try:
@@ -147,107 +207,122 @@ class PaperTradingBot:
             return None
     
     def get_best_ask(self, token_id):
-        """Get best ask price from Polymarket API"""
         try:
-            url = f"https://clob.polymarket.com/book?token_id={token_id}"
-            resp = requests.get(url, timeout=5).json()
-            
-            if 'asks' in resp and resp['asks']:
-                return float(resp['asks'][0]['price'])
+            book = self.client.get_order_book(token_id)
+            if book.asks:
+                return min(float(o.price) for o in book.asks)
             return None
         except:
             return None
     
     def get_best_bid(self, token_id):
-        """Get best bid price from Polymarket API"""
         try:
-            url = f"https://clob.polymarket.com/book?token_id={token_id}"
-            resp = requests.get(url, timeout=5).json()
-            
-            if 'bids' in resp and resp['bids']:
-                return float(resp['bids'][0]['price'])
+            book = self.client.get_order_book(token_id)
+            if book.bids:
+                return max(float(o.price) for o in book.bids)
             return None
         except:
             return None
     
-    def validate_signal(self, signals, entry_side):
-        """
-        CRITICAL FIX: Validate that momentum is actually positive
-        This prevents the bug that caused 36% of trades to fail
-        """
-        if entry_side == "YES":
-            mom = signals['yes_momentum']
-            if mom <= MOMENTUM_THRESHOLD:
-                print(f"   ❌ INVALID: YES momentum {mom:+.4f} below threshold +{MOMENTUM_THRESHOLD}")
-                return False
-            print(f"   ✅ VALID: YES momentum {mom:+.4f} > +{MOMENTUM_THRESHOLD}")
-        else:
-            mom = signals['no_momentum']
-            if mom <= MOMENTUM_THRESHOLD:
-                print(f"   ❌ INVALID: NO momentum {mom:+.4f} below threshold +{MOMENTUM_THRESHOLD}")
-                return False
-            print(f"   ✅ VALID: NO momentum {mom:+.4f} > +{MOMENTUM_THRESHOLD}")
-        
-        return True
+    def buy(self, token_id, price, size):
+        """Place buy order"""
+        try:
+            size = round(size, 1)
+            if size < MIN_ORDER_SIZE:
+                return None
+            
+            limit_price = min(0.99, round(price + 0.01, 2))
+            
+            print(f"   📤 BUYING | Size: {size} | Price: ${price:.2f} | Limit: ${limit_price:.2f}")
+            
+            order = self.client.create_order(OrderArgs(
+                price=limit_price,
+                size=size,
+                side=BUY,
+                token_id=token_id,
+            ))
+            
+            resp = self.client.post_orders([
+                PostOrdersArgs(
+                    order=order,
+                    orderType=OrderType.GTC,
+                )
+            ])
+            
+            if resp and len(resp) > 0:
+                order_result = resp[0]
+                order_id = order_result.get('orderID')
+                success = order_result.get('success')
+                
+                if success and order_id:
+                    print(f"   ✅ FILLED (Order ID: {order_id})")
+                    return order_id
+            
+            print(f"   ❌ Order failed")
+            return None
+        except Exception as e:
+            print(f"   ❌ Buy error: {e}")
+            return None
+    
+    def sell(self, token_id, price, size):
+        """Place sell order"""
+        try:
+            size = round(size, 1)
+            if size < MIN_ORDER_SIZE:
+                return None
+            
+            print(f"   📤 SELLING | Size: {size} | Price: ${price:.2f}")
+            
+            order = self.client.create_order(OrderArgs(
+                price=price,
+                size=size,
+                side=SELL,
+                token_id=token_id,
+            ))
+            
+            resp = self.client.post_orders([
+                PostOrdersArgs(
+                    order=order,
+                    orderType=OrderType.GTC,
+                )
+            ])
+            
+            if resp and len(resp) > 0:
+                order_result = resp[0]
+                order_id = order_result.get('orderID')
+                success = order_result.get('success')
+                
+                if success and order_id:
+                    print(f"   ✅ SOLD (Order ID: {order_id})")
+                    return order_id
+            
+            print(f"   ❌ Sell failed")
+            return None
+        except Exception as e:
+            print(f"   ❌ Sell error: {e}")
+            return None
     
     def calculate_signals(self):
-        """Calculate all trading signals"""
         yes_momentum, yes_early, yes_mid = self.price_history.calculate_momentum("YES")
         no_momentum, no_early, no_mid = self.price_history.calculate_momentum("NO")
         
-        signals = {
+        return {
             'yes_momentum': yes_momentum,
             'no_momentum': no_momentum,
             'yes_early': yes_early,
             'yes_mid': yes_mid,
             'no_early': no_early,
             'no_mid': no_mid,
-            'signals': [],
-            'side': None,
-            'confidence': 0
+            'side': None
         }
-        
-        if yes_momentum is None or no_momentum is None:
-            return signals
-        
-        # Primary signal: Momentum (MUST be positive)
-        if yes_momentum > MOMENTUM_THRESHOLD:
-            signals['signals'].append(('momentum', 'YES', yes_momentum))
-        
-        if no_momentum > MOMENTUM_THRESHOLD:
-            signals['signals'].append(('momentum', 'NO', no_momentum))
-        
-        # Confirmation signals (if enabled)
-        if USE_CONFIRMATION_SIGNALS and yes_mid and no_mid:
-            if yes_mid > MID_EARLY_PRICE_THRESHOLD:
-                signals['signals'].append(('price', 'YES', yes_mid))
-            elif no_mid > MID_EARLY_PRICE_THRESHOLD:
-                signals['signals'].append(('price', 'NO', no_mid))
-            
-            mid_gap = yes_mid - no_mid
-            if mid_gap > MID_EARLY_GAP_THRESHOLD:
-                signals['signals'].append(('gap', 'YES', mid_gap))
-            elif mid_gap < -MID_EARLY_GAP_THRESHOLD:
-                signals['signals'].append(('gap', 'NO', abs(mid_gap)))
-        
-        # Determine side based on momentum strength
-        yes_signals = [s for s in signals['signals'] if s[1] == 'YES']
-        no_signals = [s for s in signals['signals'] if s[1] == 'NO']
-        
-        if len(yes_signals) >= MIN_SIGNALS_REQUIRED and len(yes_signals) > len(no_signals):
-            signals['side'] = "YES"
-            signals['confidence'] = len(yes_signals)
-        elif len(no_signals) >= MIN_SIGNALS_REQUIRED and len(no_signals) > len(yes_signals):
-            signals['side'] = "NO"
-            signals['confidence'] = len(no_signals)
-        
-        return signals
     
-    def simulate_trade(self, market, market_start_time):
-        """
-        Main strategy execution - SIMULATED
-        This runs the full strategy but doesn't place real trades
-        """
+    def validate_momentum(self, momentum):
+        """Check if momentum is within range: 0.050 < momentum < 0.100"""
+        if momentum is None:
+            return False
+        return MIN_MOMENTUM < momentum < MAX_MOMENTUM
+    
+    def execute_strategy(self, market, market_start_time):
         slug = market['slug']
         market_end_time = market_start_time + 900
         
@@ -257,11 +332,11 @@ class PaperTradingBot:
         self.price_history.clear()
         
         print(f"\n{'='*80}")
-        print(f"📊 OBSERVATION PHASE: {market['title']}")
+        print(f"📊 OBSERVATION: {market['title']}")
         print(f"{'='*80}")
-        print(f"Recording price data from 15:00 → 9:00 remaining...\n")
+        print(f"Recording 15:00 → 9:00...\n")
         
-        # Phase 1: OBSERVATION (15:00 → 9:00)
+        # Phase 1: OBSERVATION
         while True:
             current_time = time.time()
             time_remaining = market_end_time - current_time
@@ -288,50 +363,61 @@ class PaperTradingBot:
             
             time.sleep(CHECK_INTERVAL)
         
-        # Check if we have enough data
         if len(self.price_history.timestamps) < 10:
-            print(f"\n⚠️ Insufficient data ({len(self.price_history.timestamps)} obs)")
+            print(f"\n⚠️ Insufficient data")
             self.traded_markets.add(slug)
             return "insufficient_data"
         
         # Phase 2: EVALUATION
         print(f"\n\n{'='*80}")
-        print(f"🔍 EVALUATION PHASE")
+        print(f"🔍 EVALUATION")
         print(f"{'='*80}")
-        print(f"Observations: {len(self.price_history.timestamps)}\n")
         
         signals = self.calculate_signals()
         
-        print(f"📊 MOMENTUM ANALYSIS:")
-        if signals['yes_momentum'] is not None:
-            print(f"   YES: Early ${signals['yes_early']:.3f} → Mid ${signals['yes_mid']:.3f} = {signals['yes_momentum']:+.4f}")
-            print(f"   NO:  Early ${signals['no_early']:.3f} → Mid ${signals['no_mid']:.3f} = {signals['no_momentum']:+.4f}")
+        print(f"\n📊 MOMENTUM:")
+        print(f"   YES: {signals['yes_momentum']:+.4f}")
+        print(f"   NO:  {signals['no_momentum']:+.4f}")
+        print(f"\n✅ VALID RANGE: 0.050 < momentum < 0.100")
         
-        print(f"\n🎲 SIGNALS ({len(signals['signals'])}):")
-        for sig_type, sig_side, sig_value in signals['signals']:
-            print(f"   ✓ {sig_type.upper()}: {sig_side}")
+        # Determine which side to trade
+        yes_valid = self.validate_momentum(signals['yes_momentum'])
+        no_valid = self.validate_momentum(signals['no_momentum'])
         
-        if not signals['side']:
-            print(f"\n⏭️  No signal (need {MIN_SIGNALS_REQUIRED})")
+        print(f"\n   YES valid: {'✅' if yes_valid else '❌'}")
+        print(f"   NO valid:  {'✅' if no_valid else '❌'}")
+        
+        entry_side = None
+        entry_token = None
+        
+        if yes_valid and not no_valid:
+            entry_side = "YES"
+            entry_token = market['yes_token']
+        elif no_valid and not yes_valid:
+            entry_side = "NO"
+            entry_token = market['no_token']
+        elif yes_valid and no_valid:
+            # Both valid - choose stronger momentum
+            if signals['yes_momentum'] > signals['no_momentum']:
+                entry_side = "YES"
+                entry_token = market['yes_token']
+            else:
+                entry_side = "NO"
+                entry_token = market['no_token']
+        
+        if not entry_side:
+            print(f"\n⏭️  No valid signal")
             self.traded_markets.add(slug)
             return "no_signal"
         
-        entry_side = signals['side']
-        entry_token = market['yes_token'] if entry_side == "YES" else market['no_token']
+        print(f"\n✅ SIGNAL: {entry_side}")
         
         # Get entry price
         entry_price = self.get_best_ask(entry_token)
         if entry_price is None:
-            print(f"\n❌ Could not get price")
+            print(f"\n❌ No price")
             self.traded_markets.add(slug)
             return "no_price"
-        
-        # VALIDATION CHECK (Critical fix)
-        print(f"\n🔍 SIGNAL VALIDATION:")
-        if not self.validate_signal(signals, entry_side):
-            print(f"\n⛔ TRADE BLOCKED - Invalid signal (negative momentum)")
-            self.traded_markets.add(slug)
-            return "invalid_signal"
         
         # Price check
         if entry_price > MAX_ENTRY_PRICE:
@@ -339,31 +425,32 @@ class PaperTradingBot:
             self.traded_markets.add(slug)
             return "price_too_high"
         
-        # Calculate R:R
-        risk = entry_price - STOP_LOSS
-        reward = TAKE_PROFIT - entry_price
-        rr_ratio = reward / risk if risk > 0 else 0
+        # Calculate stop loss (5 cents below entry)
+        stop_loss = STOP_LOSS
         
-        print(f"\n💰 RISK/REWARD:")
+        print(f"\n💰 TRADE SETUP:")
         print(f"   Entry: ${entry_price:.3f}")
-        print(f"   Risk: ${risk:.3f} | Reward: ${reward:.3f}")
-        print(f"   R:R Ratio: 1:{rr_ratio:.2f}")
+        print(f"   Size: {POSITION_SIZE} shares")
+        print(f"   Stop: ${stop_loss:.2f} (fixed)")
+        print(f"   TP: ${TAKE_PROFIT:.2f}")
         
-        if rr_ratio < 1.0:
-            print(f"   ⚠️ Warning: Poor R:R ratio (< 1:1)")
-        
-        # Phase 3: SIMULATED ENTRY
+        # Phase 3: ENTRY
         current_time = time.time()
         time_remaining = market_end_time - current_time
+        balance_before = self.get_balance()
         
         print(f"\n{'='*80}")
-        print(f"📝 SIMULATED ENTRY")
+        print(f"🚀 ENTERING TRADE")
         print(f"{'='*80}")
-        print(f"   Side: {entry_side}")
-        print(f"   Price: ${entry_price:.3f}")
-        print(f"   Shares: {POSITION_SIZE}")
-        print(f"   Time: {int(time_remaining)}s remaining")
-        print(f"\n   💡 In live mode, would BUY {POSITION_SIZE} shares here")
+        
+        order_id = self.buy(entry_token, entry_price, POSITION_SIZE)
+        
+        if not order_id:
+            print(f"\n❌ Entry failed")
+            self.traded_markets.add(slug)
+            return "entry_failed"
+        
+        print(f"\n✅ POSITION OPENED")
         
         trade_data = {
             'timestamp': datetime.now(timezone.utc).isoformat(),
@@ -372,35 +459,23 @@ class PaperTradingBot:
             'entry_side': entry_side,
             'entry_price': entry_price,
             'shares': POSITION_SIZE,
+            'order_id': order_id,
             'yes_momentum': signals['yes_momentum'],
             'no_momentum': signals['no_momentum'],
-            'yes_early': signals['yes_early'],
-            'yes_mid': signals['yes_mid'],
-            'no_early': signals['no_early'],
-            'no_mid': signals['no_mid'],
-            'signal_valid': True,
-            'signals_count': signals['confidence'],
-            'time_remaining_at_entry': int(time_remaining),
-            'risk_reward_ratio': rr_ratio
+            'balance_before': balance_before
         }
         
-        # Phase 4: SIMULATED MONITORING
-        return self.simulate_monitoring(
-            market, entry_token, entry_side, entry_price,
-            market_end_time, trade_data
+        # Phase 4: MONITORING
+        return self.monitor_position(
+            market, entry_token, entry_price, stop_loss,
+            POSITION_SIZE, market_end_time, trade_data
         )
     
-    def simulate_monitoring(self, market, entry_token, entry_side, entry_price,
-                           market_end_time, trade_data):
-        """Simulate position monitoring"""
-        print(f"\n📊 MONITORING SIMULATED POSITION...")
-        print(f"   Watching for TP: ${TAKE_PROFIT:.2f} | SL: ${STOP_LOSS:.2f}\n")
+    def monitor_position(self, market, entry_token, entry_price, stop_loss,
+                        shares, market_end_time, trade_data):
+        print(f"\n📊 MONITORING POSITION...")
         
         slug = market['slug']
-        stop_loss = STOP_LOSS
-        trailing_stop_active = False
-        highest_price = entry_price
-        lowest_price = entry_price
         
         while True:
             try:
@@ -410,7 +485,9 @@ class PaperTradingBot:
                 # Market closing
                 if time_remaining <= 10:
                     exit_price = self.get_best_bid(entry_token) or 0.99
-                    pnl = (exit_price - entry_price) * POSITION_SIZE
+                    exit_id = self.sell(entry_token, exit_price, shares)
+                    
+                    pnl = (exit_price - entry_price) * shares
                     pnl_pct = ((exit_price - entry_price) / entry_price) * 100
                     
                     print(f"\n\n⏰ MARKET CLOSED")
@@ -420,12 +497,11 @@ class PaperTradingBot:
                     trade_data.update({
                         'exit_reason': 'MARKET_CLOSED',
                         'exit_price': exit_price,
-                        'exit_time_remaining': int(time_remaining),
-                        'highest_price': highest_price,
-                        'lowest_price': lowest_price,
+                        'exit_order_id': exit_id,
                         'gross_pnl': pnl,
                         'pnl_percent': pnl_pct,
-                        'win_loss': 'WIN' if pnl > 0 else 'LOSS'
+                        'win_loss': 'WIN' if pnl > 0 else 'LOSS',
+                        'balance_after': self.get_balance()
                     })
                     
                     self.log_trade(trade_data)
@@ -434,7 +510,6 @@ class PaperTradingBot:
                         self.session_wins += 1
                     else:
                         self.session_losses += 1
-                    self.session_pnl += pnl
                     self.traded_markets.add(slug)
                     
                     return "market_closed"
@@ -445,62 +520,45 @@ class PaperTradingBot:
                     time.sleep(CHECK_INTERVAL)
                     continue
                 
-                # Track price range
-                if current_bid > highest_price:
-                    highest_price = current_bid
-                if current_bid < lowest_price:
-                    lowest_price = current_bid
-                
-                # Trailing stop logic
-                if current_bid >= TRAILING_STOP_TRIGGER and not trailing_stop_active:
-                    trailing_stop_active = True
-                    stop_loss = current_bid - TRAILING_STOP_DISTANCE
-                    print(f"\n🎯 Trailing stop activated @ ${stop_loss:.2f}")
-                
-                if trailing_stop_active:
-                    new_stop = current_bid - TRAILING_STOP_DISTANCE
-                    if new_stop > stop_loss:
-                        stop_loss = new_stop
-                
-                # Display status
-                pnl_now = (current_bid - entry_price) * POSITION_SIZE
+                pnl_now = (current_bid - entry_price) * shares
                 pnl_pct_now = ((current_bid - entry_price) / entry_price) * 100
                 
                 mins = int(time_remaining // 60)
                 secs = int(time_remaining % 60)
-                print(f"\r⏱️  [{mins:02d}:{secs:02d}] ${current_bid:.3f} | P&L: ${pnl_now:+.2f} ({pnl_pct_now:+.2f}%) | Stop: ${stop_loss:.2f}", end="", flush=True)
+                print(f"\r⏱️  [{mins:02d}:{secs:02d}] ${current_bid:.3f} | P&L: ${pnl_now:+.2f} ({pnl_pct_now:+.2f}%)", end="", flush=True)
                 
                 # Check stop loss
                 if current_bid <= stop_loss:
-                    pnl = (current_bid - entry_price) * POSITION_SIZE
+                    exit_id = self.sell(entry_token, current_bid, shares)
+                    
+                    pnl = (current_bid - entry_price) * shares
                     pnl_pct = ((current_bid - entry_price) / entry_price) * 100
                     
-                    print(f"\n\n🛑 STOP LOSS HIT @ ${current_bid:.3f}")
+                    print(f"\n\n🛑 STOP LOSS @ ${current_bid:.3f}")
                     print(f"   P&L: ${pnl:+.2f} ({pnl_pct:+.2f}%)")
                     
                     trade_data.update({
                         'exit_reason': 'STOP_LOSS',
                         'exit_price': current_bid,
-                        'exit_time_remaining': int(time_remaining),
-                        'highest_price': highest_price,
-                        'lowest_price': lowest_price,
+                        'exit_order_id': exit_id,
                         'gross_pnl': pnl,
                         'pnl_percent': pnl_pct,
-                        'win_loss': 'LOSS' if pnl < 0 else 'BREAKEVEN'
+                        'win_loss': 'LOSS',
+                        'balance_after': self.get_balance()
                     })
                     
                     self.log_trade(trade_data)
                     self.session_trades += 1
-                    if pnl < 0:
-                        self.session_losses += 1
-                    self.session_pnl += pnl
+                    self.session_losses += 1
                     self.traded_markets.add(slug)
                     
                     return "stop_loss"
                 
                 # Check take profit
                 if current_bid >= TAKE_PROFIT:
-                    pnl = (current_bid - entry_price) * POSITION_SIZE
+                    exit_id = self.sell(entry_token, current_bid, shares)
+                    
+                    pnl = (current_bid - entry_price) * shares
                     pnl_pct = ((current_bid - entry_price) / entry_price) * 100
                     
                     print(f"\n\n🚀 TAKE PROFIT @ ${current_bid:.3f}")
@@ -509,18 +567,16 @@ class PaperTradingBot:
                     trade_data.update({
                         'exit_reason': 'TAKE_PROFIT',
                         'exit_price': current_bid,
-                        'exit_time_remaining': int(time_remaining),
-                        'highest_price': highest_price,
-                        'lowest_price': lowest_price,
+                        'exit_order_id': exit_id,
                         'gross_pnl': pnl,
                         'pnl_percent': pnl_pct,
-                        'win_loss': 'WIN'
+                        'win_loss': 'WIN',
+                        'balance_after': self.get_balance()
                     })
                     
                     self.log_trade(trade_data)
                     self.session_trades += 1
                     self.session_wins += 1
-                    self.session_pnl += pnl
                     self.traded_markets.add(slug)
                     
                     return "take_profit"
@@ -532,18 +588,16 @@ class PaperTradingBot:
                 time.sleep(5)
     
     def run(self):
-        """Main bot loop"""
         print(f"{'='*80}")
-        print(f"🚀 PAPER TRADING BOT STARTED")
+        print(f"🚀 LIVE TRADING BOT STARTED")
         print(f"{'='*80}")
-        print(f"\n⚙️  CONFIGURATION:")
-        print(f"   Momentum threshold: +{MOMENTUM_THRESHOLD:.4f}")
+        print(f"\n⚙️  STRATEGY:")
+        print(f"   Momentum: 0.050 < momentum < 0.100")
         print(f"   Max entry: ${MAX_ENTRY_PRICE:.2f}")
-        print(f"   Stop loss: ${STOP_LOSS:.2f}")
+        print(f"   Stop loss: $0.05 (fixed)")
         print(f"   Take profit: ${TAKE_PROFIT:.2f}")
-        print(f"   Position size: {POSITION_SIZE} shares")
-        print(f"   Confirmation signals: {USE_CONFIRMATION_SIGNALS}")
-        print(f"\n💡 All trades are SIMULATED - no real money at risk\n")
+        print(f"   Position: {POSITION_SIZE} shares")
+        print(f"\n⚠️  LIVE TRADING - Real money at risk\n")
         
         current_market = None
         
@@ -561,38 +615,44 @@ class PaperTradingBot:
                         market_end_time = market_timestamp + 900
                         time_left = market_end_time - current_timestamp
                         print(f"✅ Found: {current_market['title']}")
-                        print(f"   Time remaining: {time_left//60}m {time_left%60}s\n")
+                        print(f"   Time: {time_left//60}m {time_left%60}s\n")
                         
-                        status = self.simulate_trade(current_market, market_timestamp)
+                        try:
+                            self.client.cancel_all()
+                            time.sleep(1)
+                        except:
+                            pass
+                        
+                        status = self.execute_strategy(current_market, market_timestamp)
                         
                         if status in ["take_profit", "stop_loss", "market_closed"]:
+                            balance = self.get_balance()
+                            pnl = balance - self.starting_balance
                             wr = (self.session_wins / self.session_trades * 100) if self.session_trades > 0 else 0
                             
                             print(f"\n{'='*80}")
-                            print(f"📊 SESSION SUMMARY")
+                            print(f"📊 SESSION")
                             print(f"{'='*80}")
-                            print(f"   Trades: {self.session_trades}")
-                            print(f"   Wins: {self.session_wins} | Losses: {self.session_losses}")
-                            print(f"   Win Rate: {wr:.1f}%")
-                            print(f"   Total P&L: ${self.session_pnl:+.2f}")
+                            print(f"   Trades: {self.session_trades} | W: {self.session_wins} | L: {self.session_losses}")
+                            print(f"   Balance: ${balance:.2f} | P&L: ${pnl:+.2f} | WR: {wr:.1f}%")
                             print(f"{'='*80}\n")
                     else:
-                        print(f"⏳ Market not available yet...")
+                        print(f"⏳ Waiting...")
                         time.sleep(30)
                 
                 time.sleep(CHECK_INTERVAL)
                 
             except KeyboardInterrupt:
                 print(f"\n\n{'='*80}")
-                print(f"🛑 PAPER TRADING STOPPED")
+                print(f"🛑 BOT STOPPED")
                 print(f"{'='*80}")
+                balance = self.get_balance()
+                pnl = balance - self.starting_balance
                 wr = (self.session_wins / self.session_trades * 100) if self.session_trades > 0 else 0
-                print(f"\n📊 FINAL RESULTS:")
-                print(f"   Total trades: {self.session_trades}")
-                print(f"   Wins: {self.session_wins} | Losses: {self.session_losses}")
-                print(f"   Win rate: {wr:.1f}%")
-                print(f"   Total P&L: ${self.session_pnl:+.2f}")
-                print(f"\n📄 Check {PAPER_TRADE_LOG} for detailed results")
+                print(f"\n📊 FINAL:")
+                print(f"   Trades: {self.session_trades} | W: {self.session_wins} | L: {self.session_losses}")
+                print(f"   Balance: ${self.starting_balance:.2f} → ${balance:.2f}")
+                print(f"   P&L: ${pnl:+.2f} | WR: {wr:.1f}%")
                 break
             except Exception as e:
                 print(f"\n❌ Error: {e}")
@@ -601,5 +661,5 @@ class PaperTradingBot:
                 time.sleep(10)
 
 if __name__ == "__main__":
-    bot = PaperTradingBot()
+    bot = MomentumLiveBot()
     bot.run()

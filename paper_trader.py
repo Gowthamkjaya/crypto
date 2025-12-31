@@ -14,7 +14,10 @@ from eth_account import Account
 # 🔧 CONFIGURATION - LIVE TRADING
 # ==========================================
 
-PRIVATE_KEY = "0xbbd185bb356315b5f040a2af2fa28549177f3087559bb76885033e9cf8e8bf34"
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+if not PRIVATE_KEY:
+    raise ValueError("❌ PRIVATE_KEY not found in environment variables!")
+    
 POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
 
 # Strategy Settings
@@ -662,4 +665,5 @@ class MomentumLiveBot:
 
 if __name__ == "__main__":
     bot = MomentumLiveBot()
+
     bot.run()

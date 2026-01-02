@@ -29,7 +29,7 @@ PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 if not PRIVATE_KEY:
     raise ValueError("❌ PRIVATE_KEY not found in environment variables!")
     
-POLYMARKET_ADDRESS = "0x6C83e9bd90C67fDb623ff6E46f6Ef8C4EC5A1cba"
+POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
 
 wallet = Account.from_key(PRIVATE_KEY)
 if wallet.address.lower() == POLYMARKET_ADDRESS.lower():
@@ -767,5 +767,6 @@ class BTCArbitrageBot:
 
 if __name__ == "__main__":
     BTCArbitrageBot().run()
+
 
 

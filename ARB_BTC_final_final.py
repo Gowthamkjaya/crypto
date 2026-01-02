@@ -24,7 +24,6 @@ class OrderOptions:
 # ==========================================
 # 🛠️ USER CONFIGURATION
 # ==========================================
-
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 if not PRIVATE_KEY:
     raise ValueError("❌ PRIVATE_KEY not found in environment variables!")
@@ -58,8 +57,6 @@ STOP_LOSS_DELAY = 420 # Seconds to wait before triggering stop loss for buy leg
 HEDGE_STOP_LOSS_PRICE = 0.32  # If Lead Leg bid drops below this, trigger stop loss
 STOP_LOSS_COOLDOWN_MINUTES = 30 # Minutes to avoid re-entering after a stop loss, cool down period
 
-# Set to "LOW" to start with the side <= MAX_FIRST_BID (0.45)
-# Set to "HIGH" to start with the side >= MIN_HIGH_BID (0.55) and <= MAX_HIGH_BID (0.66)
 ENTRY_SIDE_PREFERENCE = "HIGH"
 MAX_FIRST_BID = 0.45   # For "LOW" preference
 MIN_HIGH_BID = 0.54    # For "HIGH" preference
@@ -71,6 +68,7 @@ MAX_HIGH_BID = 0.68   # Absolute max to avoid overpaying For "HIGH" preference
 TRIGGER_ASK_PRICE = 0.12
 OTHER_SIDE_LIMIT_PRICE = 0.92
 PANIC_SELL_THRESHOLD = 0.65 # If the bid drops below this during exit, we panic sell immediately  
+target_wait_time = 480 # The sell minute check 
 MARKET_DURATION = 900
 ROUND_HARD_STOP = 810 # cancelling execution of sell orders at the last 90 seconds if leg1 didn't sell yet
 ROUND_HARD_STOP_leg2 = 900 - ROUND_HARD_STOP # additional time for leg 2 to complete after leg 1 sell
@@ -105,7 +103,7 @@ init_log()
 HOST = "https://clob.polymarket.com"
 DATA_API_URL = "https://data-api.polymarket.com"
 CHAIN_ID = 137
-RPC_URL = "https://polygon-mainnet.g.alchemy.com/v2/Vwy188P6gCu8mAUrbObWH"
+RPC_URL = "https://polygon-rpc.com"
 
 class BTCArbitrageBot:
     def __init__(self):
@@ -130,7 +128,7 @@ class BTCArbitrageBot:
         self.no_liq_history = deque(maxlen=MOVING_RATIO_TIMEFRAME)
         self.traded_markets = set() 
 
-    def save_log(self, record):
+    def save_log(self, record): 
         try:
             with open(LOG_FILE, mode='a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -153,24 +151,42 @@ class BTCArbitrageBot:
         return math.floor(n * multiplier) / multiplier
 
     def get_all_shares_available(self, yes_token, no_token):
-        print(f"🔍 Accessing Data API for position verification...")
-        balances = {"yes": 0.0, "no": 0.0}
-        try:
-            url = f"{DATA_API_URL}/positions?user={TRADING_ADDRESS}"
-            resp = requests.get(url, timeout=10).json()
-            for pos in resp:
-                asset = pos.get('asset')
-                size = self.floor_round(float(pos.get('size', 0)), 1)
-                if asset == yes_token: 
-                    balances["yes"] = size
-                    print(f"   📊 YES Position: {size} shares")
-                elif asset == no_token: 
-                    balances["no"] = size
-                    print(f"   📊 NO Position: {size} shares")
-            return balances
-        except Exception as e:
-            print(f"⚠️ Balance API error: {e}. Fallback used.")
-            return {"yes": POSITION_SIZE, "no": POSITION_SIZE}
+        """
+        Fetches positions from the Data API with a 5-attempt retry logic.
+        If all attempts fail, raises an Exception to skip the market.
+        """
+        for attempt in range(5):
+            try:
+                print(f"🔍 Accessing Data API for position verification (Attempt {attempt+1}/5)...")
+                balances = {"yes": 0.0, "no": 0.0}
+                url = f"{DATA_API_URL}/positions?user={TRADING_ADDRESS}"
+                
+                # Increase timeout slightly to handle API lag
+                resp = requests.get(url, timeout=12).json()
+                
+                # Iterate through returned positions
+                for pos in resp:
+                    asset = pos.get('asset')
+                    # Use float(pos.get('size', 0)) to handle string/null outputs
+                    size = self.floor_round(float(pos.get('size', 0)), 1)
+                    
+                    if asset == yes_token: 
+                        balances["yes"] = size
+                        print(f"    📊 YES Position: {size} shares")
+                    elif asset == no_token: 
+                        balances["no"] = size
+                        print(f"    📊 NO Position: {size} shares")
+                
+                # Success: Return the actual balances found
+                return balances
+
+            except Exception as e:
+                print(f"⚠️ Balance API attempt {attempt+1} failed: {e}")
+                if attempt < 4:
+                    time.sleep(2)
+                else:
+                    print(f"❌ Critical: Balance API failed after 5 attempts. Aborting market.")
+                    raise Exception("Data API Unreachable")
 
     def check_order_status(self, order_id):
         try:
@@ -460,7 +476,7 @@ class BTCArbitrageBot:
                 while True:
                     # 1. Verify current shares available via Data API
                     bal_check = self.get_all_shares_available(market['yes_token'], market['no_token'])
-                    current_shares = bal_check[first]
+                    current_shares = bal_check[first] if bal_check[first] >= POSITION_SIZE else bal_check[second]
                     
                     if current_shares <= 0:
                         print(f"✅ Liquidation Complete: No remaining {first.upper()} shares found.")
@@ -510,7 +526,6 @@ class BTCArbitrageBot:
         print(f"\n✅ HEDGE FILLED! Both sides locked. Safety timer disabled.")
         current_time = time.time()
         elapsed_since_start = current_time - market_start_time
-        target_wait_time = 541  # The 10th minute mark
         
         if elapsed_since_start < target_wait_time:
             wait_duration = target_wait_time - elapsed_since_start
@@ -767,6 +782,3 @@ class BTCArbitrageBot:
 
 if __name__ == "__main__":
     BTCArbitrageBot().run()
-
-
-

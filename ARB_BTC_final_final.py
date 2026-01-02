@@ -24,7 +24,11 @@ class OrderOptions:
 # ==========================================
 # 🛠️ USER CONFIGURATION
 # ==========================================
-PRIVATE_KEY = "0x6cbe6580d99aa3a3bf1d7d93e5df6024d8d1cedb080526f4c834196fa2fe156f"
+
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+if not PRIVATE_KEY:
+    raise ValueError("❌ PRIVATE_KEY not found in environment variables!")
+    
 POLYMARKET_ADDRESS = "0x6C83e9bd90C67fDb623ff6E46f6Ef8C4EC5A1cba"
 
 wallet = Account.from_key(PRIVATE_KEY)
@@ -763,3 +767,4 @@ class BTCArbitrageBot:
 
 if __name__ == "__main__":
     BTCArbitrageBot().run()
+

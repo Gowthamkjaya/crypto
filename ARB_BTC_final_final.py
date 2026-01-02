@@ -105,7 +105,7 @@ init_log()
 HOST = "https://clob.polymarket.com"
 DATA_API_URL = "https://data-api.polymarket.com"
 CHAIN_ID = 137
-RPC_URL = "https://polygon-rpc.com"
+RPC_URL = "https://polygon-mainnet.g.alchemy.com/v2/Vwy188P6gCu8mAUrbObWH"
 
 class BTCArbitrageBot:
     def __init__(self):
@@ -767,4 +767,5 @@ class BTCArbitrageBot:
 
 if __name__ == "__main__":
     BTCArbitrageBot().run()
+
 

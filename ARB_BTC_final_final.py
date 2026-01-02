@@ -24,11 +24,8 @@ class OrderOptions:
 # ==========================================
 # 🛠️ USER CONFIGURATION
 # ==========================================
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")
-if not PRIVATE_KEY:
-    raise ValueError("❌ PRIVATE_KEY not found in environment variables!")
-    
-POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
+PRIVATE_KEY = "0x6cbe6580d99aa3a3bf1d7d93e5df6024d8d1cedb080526f4c834196fa2fe156f"
+POLYMARKET_ADDRESS = "0x6C83e9bd90C67fDb623ff6E46f6Ef8C4EC5A1cba"
 
 wallet = Account.from_key(PRIVATE_KEY)
 if wallet.address.lower() == POLYMARKET_ADDRESS.lower():
@@ -44,17 +41,17 @@ else:
 # 🎯 ARBITRAGE & BUY SETTINGS
 # ==========================================
 ENTRY_WINDOW_START = 840 # Start considering markets after 45 seconds of open 
-ENTRY_WINDOW_END = 540 # Strictly ignore markets older than this
+ENTRY_WINDOW_END = 420 # Strictly ignore markets older than this
 SUDDEN_DROP_THRESHOLD = 0.15   # 15% drop trigger
 SUDDEN_DROP_TIMEFRAME = 4      # Check drop over 4 seconds
-POSITION_SIZE = 5
+POSITION_SIZE = 7
 MIN_ENTRY_LIQUIDITY = 200
 MIN_MOVING_RATIO = 0.5        # ⚖️ Min Lead/Hedge historical ratio
 MAX_MOVING_RATIO = 1.5        # ⚖️ Max Lead/Hedge historical ratio
 MOVING_RATIO_TIMEFRAME = 60   # Number of data points to consider for moving ratio
 PAIR_TARGET_COST = 0.95  # Total cost target for both legs combined
 STOP_LOSS_DELAY = 420 # Seconds to wait before triggering stop loss for buy leg
-HEDGE_STOP_LOSS_PRICE = 0.34  # If Lead Leg bid drops below this, trigger stop loss
+HEDGE_STOP_LOSS_PRICE = 0.32  # If Lead Leg bid drops below this, trigger stop loss
 STOP_LOSS_COOLDOWN_MINUTES = 30 # Minutes to avoid re-entering after a stop loss, cool down period
 
 # Set to "LOW" to start with the side <= MAX_FIRST_BID (0.45)
@@ -75,8 +72,8 @@ ROUND_HARD_STOP = 810 # cancelling execution of sell orders at the last 90 secon
 ROUND_HARD_STOP_leg2 = 900 - ROUND_HARD_STOP # additional time for leg 2 to complete after leg 1 sell
 
 SELL_PRICE_ADJUSTMENT = 0.01
-CHECK_INTERVAL = 4 
-PRICE_IMPROVEMENT = 0.01 
+sustainment_time = 3
+PRICE_IMPROVEMENT = 0.005
 
 # ==========================================
 # 📊 LOGGING CONFIGURATION
@@ -104,7 +101,7 @@ init_log()
 HOST = "https://clob.polymarket.com"
 DATA_API_URL = "https://data-api.polymarket.com"
 CHAIN_ID = 137
-RPC_URL = "https://polygon-mainnet.g.alchemy.com/v2/Vwy188P6gCu8mAUrbObWH"
+RPC_URL = "https://polygon-rpc.com"
 
 class BTCArbitrageBot:
     def __init__(self):
@@ -292,7 +289,7 @@ class BTCArbitrageBot:
         books = {side: self.get_order_book_depth(market[f'{side}_token']) for side in ['yes', 'no']}
         if not (books['yes'] and books['no']): return
 
-        # Record current prices to history
+        # 1. Update History
         self.yes_price_history.append(books['yes']['best_ask'])
         self.no_price_history.append(books['no']['best_ask'])
         self.yes_liq_history.append(books['yes']['ask_size'])
@@ -303,7 +300,7 @@ class BTCArbitrageBot:
             print(f"📡 Building price history... ({len(self.yes_price_history)}/{SUDDEN_DROP_TIMEFRAME})", end='\r')
             return
 
-        # Calculate percentage changes
+        # 2. Drop Detection - Calculate percentage changes
         yes_change = (books['yes']['best_ask'] - self.yes_price_history[0]) / self.yes_price_history[0]
         no_change = (books['no']['best_ask'] - self.no_price_history[0]) / self.no_price_history[0]
 
@@ -322,71 +319,68 @@ class BTCArbitrageBot:
         # Regular status print if no drop triggered (optional, helps with monitoring)
         if not yes_dropped and not no_dropped:
             print(f"🔍 Monitoring: YES {yes_change*100:+.1f}% (${books['yes']['best_ask']}) | NO {no_change*100:+.1f}% (${books['no']['best_ask']})", end='\r')
+            return 
 
-        # MINIMUM LIQUIDITY FILTER
-        if yes_dropped or no_dropped:
-            yes_size = books['yes'].get('ask_size', 0)
-            no_size = books['no'].get('ask_size', 0)
-            
-            # Determine Lead and Hedge for this specific signal
-            lead_side = 'no' if yes_dropped else 'yes'
-            hedge_side = 'yes' if yes_dropped else 'no'
+        # 1. IDENTIFY NATURAL ROLES (Cheaper side is always Hedge)
+        if books['yes']['best_ask'] < books['no']['best_ask']:
+            natural_hedge, natural_lead = 'yes', 'no'
+        else:
+            natural_hedge, natural_lead = 'no', 'yes'
 
-            # A) Absolute Liquidity Filter at the time of entry
-            if yes_size < MIN_ENTRY_LIQUIDITY or no_size < MIN_ENTRY_LIQUIDITY:
-                print(f"⚠️ LIQUIDITY TRAP: Sudden Drop detected, but books are thin."
-                      f"YES: {yes_size} | NO: {no_size}. Skipping trade.")
-                time.sleep(1)
-                return
-            
-            # B) Entry Ratio Filter (Hedge Ask > Lead Ask)
-            if books[hedge_side]['ask_size'] <= books[lead_side]['ask_size']:
-                print(f"❌ REJECTED: Hedge ({books[hedge_side]['ask_size']}) <= Lead ({books[lead_side]['ask_size']}). No Buffer.")
-                return
-
-            # C) Ask Heavy Hedge Filter (Hedge Ask > Hedge Bid)
-            if books[hedge_side]['ask_size'] <= books[hedge_side]['bid_size']:
-                print(f"❌ REJECTED: Hedge is Bid-Heavy. Potential upward pressure. Skipping.")
-                return
-            else:
-                hedge_bid_size = books[hedge_side]['bid_size']
-
-            #    D) Moving Ratio Filter (Lead_Avg / Hedge_Avg)
-            avg_lead_liq = sum(self.yes_liq_history if lead_side == 'yes' else self.no_liq_history) / len(self.yes_liq_history)
-            avg_hedge_liq = sum(self.no_liq_history if lead_side == 'yes' else self.yes_liq_history) / len(self.no_liq_history)
-            moving_ratio = avg_lead_liq / avg_hedge_liq
-            if not (MIN_MOVING_RATIO <= moving_ratio <= MAX_MOVING_RATIO):
-                print(f"❌ REJECTED: Moving Ratio {moving_ratio:.2f} is outside balanced range ({MIN_MOVING_RATIO}-{MAX_MOVING_RATIO})")
-                return
-
-            print(f"✅ PASSED Liquidity & Ratio Filters: Ratio {moving_ratio:.2f} | Hedge Buff {books[hedge_side]['ask_size']} > {books[lead_side]['ask_size']}")
-
-        # C) APPLY PREFERENCE IF DROP OCCURRED
+        # 2. APPLY PREFERENCE & PRICE RANGE VALIDATION
         first, second = None, None
-        
-        if ENTRY_SIDE_PREFERENCE == "LOW":
-            # Must have dropped AND be under MAX_FIRST_BID
-            if yes_dropped and books['yes']['best_ask'] <= MAX_FIRST_BID:
-                first, second = 'yes', 'no'
-            elif no_dropped and books['no']['best_ask'] <= MAX_FIRST_BID:
-                first, second = 'no', 'yes'
-        
-        elif ENTRY_SIDE_PREFERENCE == "HIGH":
-            # If NO dropped, we check if the Winner (YES) is in our target HIGH range
-            if no_dropped and MIN_HIGH_BID <= books['yes']['best_ask'] <= MAX_HIGH_BID:
-                print(f"✅ HIGH Preference: NO dropped {no_change*100:.1f}%. Buying Winner (YES) at ${books['yes']['best_ask']}")
-                first, second = 'yes', 'no'
-            
-            # If YES dropped, we check if the Winner (NO) is in our target HIGH range
-            elif yes_dropped and MIN_HIGH_BID <= books['no']['best_ask'] <= MAX_HIGH_BID:
-                print(f"✅ HIGH Preference: YES dropped {yes_change*100:.1f}%. Buying Winner (NO) at ${books['no']['best_ask']}")
-                first, second = 'no', 'yes'
 
-        if not first:
-            # If a drop occurred but didn't meet price preferences, we wait
-            if yes_dropped or no_dropped:
-                print(f"⚠️ Drop occurred but price did not match {ENTRY_SIDE_PREFERENCE} range.")
+        if ENTRY_SIDE_PREFERENCE == "HIGH":
+            # Target the expensive side (Winner)
+            price = books[natural_lead]['best_ask']
+            if MIN_HIGH_BID <= price <= MAX_HIGH_BID:
+                first, second = natural_lead, natural_hedge
+            else:
+                print(f"⚠️ REJECTED - Outside buy range: HIGH preference Lead (${price}) outside range [{MIN_HIGH_BID}-{MAX_HIGH_BID}]")
+                return
+
+        elif ENTRY_SIDE_PREFERENCE == "LOW":
+            # Target the cheap side (Crashed)
+            price = books[natural_hedge]['best_ask']
+            if price <= MAX_FIRST_BID:
+                first, second = natural_hedge, natural_lead
+            else:
+                print(f"⚠️ REJECTED: LOW preference Lead (${price}) > MAX_FIRST_BID (${MAX_FIRST_BID})")
+                return        
+
+        # 3. 🛡️ DNA FILTERS
+
+        yes_size = books['yes'].get('ask_size', 0)
+        no_size = books['no'].get('ask_size', 0)
+
+        # A) Absolute Liquidity check
+        if yes_size < MIN_ENTRY_LIQUIDITY or no_size < MIN_ENTRY_LIQUIDITY:
+            print(f"❌ REJECTED: Thin books. YES: {books['yes']['ask_size']}, NO: {books['no']['ask_size']}")
             return
+        
+        # B) Entry Ratio (Hedge Buffer: Hedge MUST be >= Lead)
+        if books[second]['ask_size'] < books[first]['ask_size']:
+            print(f"❌ REJECTED: Hedge ({books[second]['ask_size']}) < Lead ({books[first]['ask_size']}). No Buffer.")
+            return
+
+        # C) Ask Heavy (Hedge Ask > Hedge Bid)
+        if books[second]['ask_size'] <= books[second]['bid_size']:
+            print(f"❌ REJECTED: Hedge is Bid-Heavy. Skipping to avoid rapid reversal.")
+            return
+        else:
+            hedge_bid_size = books[second]['bid_size']
+
+        # D) Moving Ratio (Lead Avg / Hedge Avg)
+        avg_lead_liq = sum(self.yes_liq_history if first == 'yes' else self.no_liq_history) / len(self.yes_liq_history)
+        avg_hedge_liq = sum(self.no_liq_history if first == 'yes' else self.yes_liq_history) / len(self.no_liq_history)
+        moving_ratio = avg_lead_liq / avg_hedge_liq
+
+        if not (MIN_MOVING_RATIO <= moving_ratio <= MAX_MOVING_RATIO):
+            print(f"❌ REJECTED: Moving Ratio {moving_ratio:.2f} imbalanced market.")
+            return
+
+        print(f"✅ PASSED Liquidity Filters: Executing {ENTRY_SIDE_PREFERENCE} on {first.upper()} at ${books[first]['best_ask']}")
+
 
         # STAGE 1: LEAD LEG (FOK)
         # The rest of the strategy proceeds as normal using the selected 'first' leg
@@ -429,7 +423,7 @@ class BTCArbitrageBot:
             if actual_s_price == "RETRY":
                 print("   🔄 Re-attempting hedge placement due to API error...")
                 self.client.cancel_all() # Clean any partial/ghost orders before retry
-                time.sleep(2)
+                time.sleep(1)
 
         if s_id and actual_s_price not in ["TIMEOUT", "PRICE_STOP_LOSS", "ERROR"]:
             log_rec['s2_time'] = datetime.now().strftime("%H:%M:%S")
@@ -563,12 +557,12 @@ class BTCArbitrageBot:
                         print(f"\n🎯 TARGET HIT: {target_side_locked.upper()} <= ${TRIGGER_ASK_PRICE}")
                     
                     elapsed_hit = time.time() - trigger_hit_time
-                    if elapsed_hit >= 3:
+                    if elapsed_hit >= sustainment_time:
                         print(f"✅ SUSTAINED: Price held for {int(elapsed_hit)}s. Proceeding to Sell...")
                         trig = target_side_locked # Set the final trigger side
                         break 
                     else:
-                        print(f"   ⏳ Sustainment: {int(3 - elapsed_hit)}s remaining for {target_side_locked.upper()}...", end='\r')
+                        print(f"   ⏳ Sustainment: {int(sustainment_time - elapsed_hit)}s remaining for {target_side_locked.upper()}...", end='\r')
                 else:
                     # Price rebounded above target: Unlock and Reset
                     print(f"\n⚠️ REBOUND: {target_side_locked.upper()} moved to ${book['best_ask'] if book else 'N/A'}. Resetting.")
@@ -768,5 +762,4 @@ class BTCArbitrageBot:
             time.sleep(1)
 
 if __name__ == "__main__":
-
     BTCArbitrageBot().run()

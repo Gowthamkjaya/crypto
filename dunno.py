@@ -22,6 +22,8 @@ class CrashReversalTrader:
         self.crash_threshold = 0.35  # 35% drop in 5 seconds
         self.lookback_seconds = 5
         self.take_profit = 0.96
+        self.stop_loss_pct = 0.50  # 50% loss from entry
+        self.position_size = 5  # Always trade 2 shares
         self.price_history = {
             'YES': deque(maxlen=10),  # Last 10 seconds of prices
             'NO': deque(maxlen=10)
@@ -74,8 +76,11 @@ class CrashReversalTrader:
         except:
             return 0
     
-    def place_order(self, clob_client, token_id, side, size=2, max_retries=5):
+    def place_order(self, clob_client, token_id, side, size=None, max_retries=5):
         """Place FOK order with retries"""
+        if size is None:
+            size = self.position_size
+            
         try:
             from py_clob_client.clob_types import OrderArgs, OrderType
             from py_clob_client.order_builder.constants import BUY as PY_BUY, SELL as PY_SELL
@@ -162,8 +167,8 @@ class CrashReversalTrader:
             if time_remaining <= 0:
                 print(f"\n⏰ Market closed. Trades executed: {trade_count}")
                 if in_position:
-                    print(f"⚠️  Still in position - closing at market...")
-                    self.place_order(clob_client, entry_token, 'SELL', size=2)
+                    print(f"⚠️  Still in position - emergency closing...")
+                    self.place_order(clob_client, entry_token, 'SELL')
                 return
             
             # Get current prices
@@ -177,36 +182,39 @@ class CrashReversalTrader:
                 # Add to history
                 self.add_price_observation(yes_price, no_price)
                 
-                # If in position, monitor for take profit
+                # If in position, monitor for take profit and stop loss
                 if in_position:
                     current_price = self.get_current_price(entry_token, clob_client)
                     pnl = current_price - entry_price
                     pnl_pct = (pnl / entry_price) * 100 if entry_price > 0 else 0
                     
-                    elapsed = 900 - time_remaining
-                    print(f"  📊 [{elapsed}s] {entry_side}: ${current_price:.2f} | P&L: ${pnl:.2f} ({pnl_pct:+.1f}%) | Target: ${self.take_profit:.2f}", end='\r')
+                    # Calculate stop loss price
+                    stop_loss_price = entry_price * (1 - self.stop_loss_pct)
                     
-                    # Check take profit
-                    if current_price >= self.take_profit:
-                        print(f"\n\n🎯 TAKE PROFIT HIT at ${current_price:.2f}")
+                    elapsed = 900 - time_remaining
+                    print(f"  📊 [{elapsed}s] {entry_side}: ${current_price:.2f} | P&L: ${pnl:.2f} ({pnl_pct:+.1f}%) | SL: ${stop_loss_price:.2f} | TP: ${self.take_profit:.2f}", end='\r')
+                    
+                    # Check stop loss FIRST
+                    if current_price <= stop_loss_price:
+                        print(f"\n\n🛑 STOP LOSS HIT at ${current_price:.2f} (Entry: ${entry_price:.2f})")
                         
                         # Force close position immediately
                         print(f"🔚 Force closing position...")
-                        close_order, close_price = self.place_order(clob_client, entry_token, 'SELL', size=2)
+                        close_order, close_price = self.place_order(clob_client, entry_token, 'SELL')
                         
                         if close_order:
                             # Use actual filled price
                             actual_exit = close_price if close_price else current_price
-                            final_pnl = (actual_exit - entry_price) * 2  # Total P&L
+                            final_pnl = (actual_exit - entry_price) * self.position_size
                             final_pnl_pct = (actual_exit - entry_price) / entry_price * 100
                             
                             print(f"\n{'='*60}")
-                            print(f"📊 TRADE #{trade_count} COMPLETE")
+                            print(f"📊 TRADE #{trade_count} COMPLETE - STOP LOSS")
                             print(f"{'='*60}")
                             print(f"  Side: {entry_side}")
                             print(f"  Entry: ${entry_price:.2f}")
                             print(f"  Exit: ${actual_exit:.2f}")
-                            print(f"  Shares: 2")
+                            print(f"  Shares: {self.position_size}")
                             print(f"  P&L: ${final_pnl:.2f} ({final_pnl_pct:+.1f}%)")
                             print(f"{'='*60}\n")
                             
@@ -220,11 +228,41 @@ class CrashReversalTrader:
                         else:
                             # Sell failed - keep trying
                             print(f"  ⚠️  Sell failed, will retry on next tick...")
-                        entry_token = None
-                        entry_price = 0
-                        entry_side = None
+                    
+                    # Check take profit
+                    elif current_price >= self.take_profit:
+                        print(f"\n\n🎯 TAKE PROFIT HIT at ${current_price:.2f}")
                         
-                        print(f"👀 Resuming crash monitoring...\n")
+                        # Force close position immediately
+                        print(f"🔚 Force closing position...")
+                        close_order, close_price = self.place_order(clob_client, entry_token, 'SELL')
+                        
+                        if close_order:
+                            # Use actual filled price
+                            actual_exit = close_price if close_price else current_price
+                            final_pnl = (actual_exit - entry_price) * self.position_size
+                            final_pnl_pct = (actual_exit - entry_price) / entry_price * 100
+                            
+                            print(f"\n{'='*60}")
+                            print(f"📊 TRADE #{trade_count} COMPLETE - TAKE PROFIT")
+                            print(f"{'='*60}")
+                            print(f"  Side: {entry_side}")
+                            print(f"  Entry: ${entry_price:.2f}")
+                            print(f"  Exit: ${actual_exit:.2f}")
+                            print(f"  Shares: {self.position_size}")
+                            print(f"  P&L: ${final_pnl:.2f} ({final_pnl_pct:+.1f}%)")
+                            print(f"{'='*60}\n")
+                            
+                            # Reset position
+                            in_position = False
+                            entry_token = None
+                            entry_price = 0
+                            entry_side = None
+                            
+                            print(f"👀 Resuming crash monitoring...\n")
+                        else:
+                            # Sell failed - keep trying
+                            print(f"  ⚠️  Sell failed, will retry on next tick...")
                 
                 # If NOT in position, look for crash
                 else:
@@ -252,7 +290,7 @@ class CrashReversalTrader:
                         
                         print(f"💸 Entering {entry_side} (opposite of crashed {crashed_side})...")
                         
-                        order, entry_price = self.place_order(clob_client, entry_token, 'BUY', size=2)
+                        order, entry_price = self.place_order(clob_client, entry_token, 'BUY')
                         
                         if order:
                             in_position = True
@@ -283,8 +321,9 @@ def main():
     print(f"Strategy:")
     print(f"  1. Monitor from market start (900s)")
     print(f"  2. Detect 35% crash in 5 seconds")
-    print(f"  3. Enter OPPOSITE side of crash")
-    print(f"  4. Exit at $0.96 (take profit)")
+    print(f"  3. Enter OPPOSITE side of crash (2 shares)")
+    print(f"  4. Stop Loss: 50% loss from entry")
+    print(f"  5. Take Profit: $0.96")
     print(f"{'='*60}\n")
     
     trader = CrashReversalTrader()

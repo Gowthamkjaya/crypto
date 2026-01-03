@@ -74,7 +74,7 @@ class CrashReversalTrader:
         except:
             return 0
     
-    def place_order(self, clob_client, token_id, side, size=10, max_retries=5):
+    def place_order(self, clob_client, token_id, side, size=2, max_retries=5):
         """Place FOK order with retries"""
         try:
             from py_clob_client.clob_types import OrderArgs, OrderType
@@ -163,7 +163,7 @@ class CrashReversalTrader:
                 print(f"\n⏰ Market closed. Trades executed: {trade_count}")
                 if in_position:
                     print(f"⚠️  Still in position - closing at market...")
-                    self.place_order(clob_client, entry_token, 'SELL', size=10)
+                    self.place_order(clob_client, entry_token, 'SELL', size=2)
                 return
             
             # Get current prices
@@ -192,12 +192,12 @@ class CrashReversalTrader:
                         
                         # Force close position immediately
                         print(f"🔚 Force closing position...")
-                        close_order, close_price = self.place_order(clob_client, entry_token, 'SELL', size=10)
+                        close_order, close_price = self.place_order(clob_client, entry_token, 'SELL', size=2)
                         
                         if close_order:
                             # Use actual filled price
                             actual_exit = close_price if close_price else current_price
-                            final_pnl = (actual_exit - entry_price) * 10  # Total P&L
+                            final_pnl = (actual_exit - entry_price) * 2  # Total P&L
                             final_pnl_pct = (actual_exit - entry_price) / entry_price * 100
                             
                             print(f"\n{'='*60}")
@@ -206,7 +206,7 @@ class CrashReversalTrader:
                             print(f"  Side: {entry_side}")
                             print(f"  Entry: ${entry_price:.2f}")
                             print(f"  Exit: ${actual_exit:.2f}")
-                            print(f"  Shares: 10")
+                            print(f"  Shares: 2")
                             print(f"  P&L: ${final_pnl:.2f} ({final_pnl_pct:+.1f}%)")
                             print(f"{'='*60}\n")
                             
@@ -252,7 +252,7 @@ class CrashReversalTrader:
                         
                         print(f"💸 Entering {entry_side} (opposite of crashed {crashed_side})...")
                         
-                        order, entry_price = self.place_order(clob_client, entry_token, 'BUY', size=10)
+                        order, entry_price = self.place_order(clob_client, entry_token, 'BUY', size=2)
                         
                         if order:
                             in_position = True

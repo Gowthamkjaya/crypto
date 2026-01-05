@@ -13,6 +13,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 from collections import deque
+import csv
+import os
 
 
 class CrashReversalTrader:
@@ -21,14 +23,60 @@ class CrashReversalTrader:
     def __init__(self):
         self.crash_threshold = 0.35  # 35% drop in 5 seconds
         self.lookback_seconds = 5
-        self.take_profit = 0.96
+        self.take_profit_pct = 0.05  # 5% profit from entry
         self.stop_loss_pct = 0.50  # 50% loss from entry
-        self.position_size = 5  # Always trade 2 shares
+        self.position_size = 2  # Always trade 2 shares
+        self.min_entry_price = 0.10  # Don't enter below 10 cents
+        self.max_entry_price = 0.90  # Don't enter above 90 cents
         self.price_history = {
             'YES': deque(maxlen=10),  # Last 10 seconds of prices
             'NO': deque(maxlen=10)
         }
         self.time_history = deque(maxlen=10)
+        self.log_file = "crash_reversal_trades.csv"
+        
+        # Initialize CSV log
+        self.initialize_log()
+    
+    def initialize_log(self):
+        """Initialize CSV log file with headers"""
+        if not os.path.exists(self.log_file):
+            headers = [
+                'timestamp',
+                'market_slug',
+                'market_title',
+                'trade_number',
+                'crashed_side',
+                'entered_side',
+                'crash_percentage',
+                'entry_time',
+                'entry_price',
+                'stop_loss_price',
+                'take_profit_price',
+                'exit_time',
+                'exit_price',
+                'exit_reason',
+                'time_in_trade_seconds',
+                'shares',
+                'gross_pnl',
+                'pnl_percentage',
+                'result'
+            ]
+            
+            with open(self.log_file, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=headers)
+                writer.writeheader()
+            
+            print(f"📊 Trade log initialized: {self.log_file}\n")
+    
+    def log_trade(self, trade_data):
+        """Log trade to CSV"""
+        try:
+            with open(self.log_file, 'a', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=trade_data.keys())
+                writer.writerow(trade_data)
+        except Exception as e:
+            print(f"  ⚠️  Logging error: {e}")
     
     def add_price_observation(self, yes_price, no_price):
         """Add price observation to history"""
@@ -150,6 +198,11 @@ class CrashReversalTrader:
         entry_token = None
         entry_price = 0
         entry_side = None
+        entry_time = None
+        stop_loss_price = 0
+        take_profit_price = 0
+        crashed_side = None
+        crash_pct = 0
         
         # Reset price history
         self.price_history = {
@@ -188,53 +241,28 @@ class CrashReversalTrader:
                     pnl = current_price - entry_price
                     pnl_pct = (pnl / entry_price) * 100 if entry_price > 0 else 0
                     
-                    # Calculate stop loss price
-                    stop_loss_price = entry_price * (1 - self.stop_loss_pct)
-                    
                     elapsed = 900 - time_remaining
-                    print(f"  📊 [{elapsed}s] {entry_side}: ${current_price:.2f} | P&L: ${pnl:.2f} ({pnl_pct:+.1f}%) | SL: ${stop_loss_price:.2f} | TP: ${self.take_profit:.2f}", end='\r')
+                    print(f"  📊 [{elapsed}s] {entry_side}: ${current_price:.2f} | P&L: ${pnl:.2f} ({pnl_pct:+.1f}%) | SL: ${stop_loss_price:.2f} | TP: ${take_profit_price:.2f}", end='\r')
+                    
+                    exit_triggered = False
+                    exit_reason = None
                     
                     # Check stop loss FIRST
                     if current_price <= stop_loss_price:
                         print(f"\n\n🛑 STOP LOSS HIT at ${current_price:.2f} (Entry: ${entry_price:.2f})")
-                        
-                        # Force close position immediately
-                        print(f"🔚 Force closing position...")
-                        close_order, close_price = self.place_order(clob_client, entry_token, 'SELL')
-                        
-                        if close_order:
-                            # Use actual filled price
-                            actual_exit = close_price if close_price else current_price
-                            final_pnl = (actual_exit - entry_price) * self.position_size
-                            final_pnl_pct = (actual_exit - entry_price) / entry_price * 100
-                            
-                            print(f"\n{'='*60}")
-                            print(f"📊 TRADE #{trade_count} COMPLETE - STOP LOSS")
-                            print(f"{'='*60}")
-                            print(f"  Side: {entry_side}")
-                            print(f"  Entry: ${entry_price:.2f}")
-                            print(f"  Exit: ${actual_exit:.2f}")
-                            print(f"  Shares: {self.position_size}")
-                            print(f"  P&L: ${final_pnl:.2f} ({final_pnl_pct:+.1f}%)")
-                            print(f"{'='*60}\n")
-                            
-                            # Reset position
-                            in_position = False
-                            entry_token = None
-                            entry_price = 0
-                            entry_side = None
-                            
-                            print(f"👀 Resuming crash monitoring...\n")
-                        else:
-                            # Sell failed - keep trying
-                            print(f"  ⚠️  Sell failed, will retry on next tick...")
+                        exit_triggered = True
+                        exit_reason = 'STOP_LOSS'
                     
-                    # Check take profit
-                    elif current_price >= self.take_profit:
-                        print(f"\n\n🎯 TAKE PROFIT HIT at ${current_price:.2f}")
-                        
+                    # Check take profit (5% from entry)
+                    elif current_price >= take_profit_price:
+                        print(f"\n\n🎯 TAKE PROFIT HIT at ${current_price:.2f} (Target: ${take_profit_price:.2f})")
+                        exit_triggered = True
+                        exit_reason = 'TAKE_PROFIT'
+                    
+                    if exit_triggered:
                         # Force close position immediately
                         print(f"🔚 Force closing position...")
+                        exit_time = datetime.now(timezone.utc)
                         close_order, close_price = self.place_order(clob_client, entry_token, 'SELL')
                         
                         if close_order:
@@ -242,62 +270,127 @@ class CrashReversalTrader:
                             actual_exit = close_price if close_price else current_price
                             final_pnl = (actual_exit - entry_price) * self.position_size
                             final_pnl_pct = (actual_exit - entry_price) / entry_price * 100
+                            time_in_trade = (exit_time - entry_time).total_seconds()
+                            
+                            result = 'WIN' if final_pnl > 0 else 'LOSS' if final_pnl < 0 else 'BREAKEVEN'
                             
                             print(f"\n{'='*60}")
-                            print(f"📊 TRADE #{trade_count} COMPLETE - TAKE PROFIT")
+                            print(f"📊 TRADE #{trade_count} COMPLETE - {exit_reason}")
                             print(f"{'='*60}")
                             print(f"  Side: {entry_side}")
-                            print(f"  Entry: ${entry_price:.2f}")
-                            print(f"  Exit: ${actual_exit:.2f}")
+                            print(f"  Entry: ${entry_price:.2f} @ {entry_time.strftime('%H:%M:%S')}")
+                            print(f"  Exit: ${actual_exit:.2f} @ {exit_time.strftime('%H:%M:%S')}")
+                            print(f"  Time in Trade: {int(time_in_trade)}s ({int(time_in_trade/60)}m {int(time_in_trade%60)}s)")
                             print(f"  Shares: {self.position_size}")
                             print(f"  P&L: ${final_pnl:.2f} ({final_pnl_pct:+.1f}%)")
+                            print(f"  Result: {result}")
                             print(f"{'='*60}\n")
                             
-                            # Reset position
+                            # Log to CSV
+                            trade_data = {
+                                'timestamp': datetime.now(timezone.utc).isoformat(),
+                                'market_slug': slug,
+                                'market_title': market['title'],
+                                'trade_number': trade_count,
+                                'crashed_side': crashed_side,
+                                'entered_side': entry_side,
+                                'crash_percentage': f"{crash_pct:.2%}",
+                                'entry_time': entry_time.isoformat(),
+                                'entry_price': f"{entry_price:.4f}",
+                                'stop_loss_price': f"{stop_loss_price:.4f}",
+                                'take_profit_price': f"{take_profit_price:.4f}",
+                                'exit_time': exit_time.isoformat(),
+                                'exit_price': f"{actual_exit:.4f}",
+                                'exit_reason': exit_reason,
+                                'time_in_trade_seconds': int(time_in_trade),
+                                'shares': self.position_size,
+                                'gross_pnl': f"{final_pnl:.4f}",
+                                'pnl_percentage': f"{final_pnl_pct:.2f}",
+                                'result': result
+                            }
+                            self.log_trade(trade_data)
+                            
+                            # Reset position - COMPLETE closure before allowing new entries
                             in_position = False
                             entry_token = None
                             entry_price = 0
                             entry_side = None
+                            entry_time = None
+                            stop_loss_price = 0
+                            take_profit_price = 0
+                            crashed_side = None
+                            crash_pct = 0
                             
                             print(f"👀 Resuming crash monitoring...\n")
                         else:
-                            # Sell failed - keep trying
+                            # Sell failed - keep trying, DON'T reset position
                             print(f"  ⚠️  Sell failed, will retry on next tick...")
                 
                 # If NOT in position, look for crash
                 else:
-                    crashed_side, crash_pct = self.detect_crash()
+                    detected_crash_side, detected_crash_pct = self.detect_crash()
                     
-                    if crashed_side:
+                    if detected_crash_side:
                         trade_count += 1
                         
                         print(f"\n{'='*60}")
                         print(f"🚨 CRASH #{trade_count} DETECTED!")
                         print(f"{'='*60}")
-                        print(f"   Side: {crashed_side}")
-                        print(f"   Drop: {crash_pct:.1%}")
+                        print(f"   Side: {detected_crash_side}")
+                        print(f"   Drop: {detected_crash_pct:.1%}")
                         print(f"   YES Price: ${yes_price:.2f}")
                         print(f"   NO Price: ${no_price:.2f}")
                         print(f"{'='*60}\n")
+                        
+                        # Store crash info
+                        crashed_side = detected_crash_side
+                        crash_pct = detected_crash_pct
                         
                         # Enter opposite side
                         if crashed_side == 'YES':
                             entry_side = 'NO'
                             entry_token = market['no_token']
+                            entry_price_estimate = no_price
                         else:
                             entry_side = 'YES'
                             entry_token = market['yes_token']
+                            entry_price_estimate = yes_price
+                        
+                        # Check if entry price is within acceptable range
+                        if entry_price_estimate < self.min_entry_price:
+                            print(f"  ⚠️  {entry_side} price too low (${entry_price_estimate:.2f} < ${self.min_entry_price:.2f})")
+                            print(f"  ⏭️  Skipping entry - low ROI potential\n")
+                            trade_count -= 1  # Don't count skipped entry
+                            continue
+                        
+                        if entry_price_estimate > self.max_entry_price:
+                            print(f"  ⚠️  {entry_side} price too high (${entry_price_estimate:.2f} > ${self.max_entry_price:.2f})")
+                            print(f"  ⏭️  Skipping entry - low ROI potential\n")
+                            trade_count -= 1  # Don't count skipped entry
+                            continue
                         
                         print(f"💸 Entering {entry_side} (opposite of crashed {crashed_side})...")
+                        print(f"   Entry price estimate: ${entry_price_estimate:.2f}")
                         
+                        entry_time = datetime.now(timezone.utc)
                         order, entry_price = self.place_order(clob_client, entry_token, 'BUY')
                         
                         if order:
+                            # Calculate stop loss and take profit based on actual entry price
+                            stop_loss_price = entry_price * (1 - self.stop_loss_pct)
+                            take_profit_price = entry_price * (1 + self.take_profit_pct)
+                            
                             in_position = True
-                            print(f"\n📈 Position opened. Monitoring for ${self.take_profit:.2f}...\n")
+                            print(f"\n📈 Position opened!")
+                            print(f"   Entry: ${entry_price:.2f}")
+                            print(f"   Stop Loss (-50%): ${stop_loss_price:.2f}")
+                            print(f"   Take Profit (+5%): ${take_profit_price:.2f}\n")
                         else:
                             print(f"  ❌ Failed to enter, continuing to monitor...\n")
                             trade_count -= 1  # Don't count failed entry
+                            # Reset crash data since entry failed
+                            crashed_side = None
+                            crash_pct = 0
                     
                     else:
                         # Display monitoring
@@ -321,9 +414,11 @@ def main():
     print(f"Strategy:")
     print(f"  1. Monitor from market start (900s)")
     print(f"  2. Detect 35% crash in 5 seconds")
-    print(f"  3. Enter OPPOSITE side of crash (2 shares)")
-    print(f"  4. Stop Loss: 50% loss from entry")
-    print(f"  5. Take Profit: $0.96")
+    print(f"  3. Enter OPPOSITE side (only if $0.10 - $0.90)")
+    print(f"  4. Position Size: 2 shares")
+    print(f"  5. Stop Loss: 50% loss from entry")
+    print(f"  6. Take Profit: 5% gain from entry")
+    print(f"  7. Detailed CSV logging enabled")
     print(f"{'='*60}\n")
     
     trader = CrashReversalTrader()

@@ -17,9 +17,9 @@ class ScalpingBot:
     """Simple 98-to-99 scalping strategy"""
     
     def __init__(self):
-        self.entry_price = 0.97  # Enter at exactly 98 cents
-        self.take_profit = 0.99  # Exit at 99 cents
-        self.stop_loss = 0.90  # Stop loss at 90 cents
+        self.entry_price = 0.99  # Enter at exactly 98 cents
+        self.take_profit = 1.00  # Exit at 99 cents
+        self.stop_loss = 0.95  # Stop loss at 90 cents
         self.position_size = 2  # Trade 2 shares
         self.last_minutes_threshold = 180  # Last 3 minutes (180 seconds)
         self.log_file = "scalping_98_99_trades.csv"

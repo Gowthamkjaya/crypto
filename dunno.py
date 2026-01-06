@@ -26,11 +26,12 @@ class CrashReversalTrader:
         self.take_profit_pct = 0.05  # 5% profit from entry (initial target)
         self.trailing_stop_pct = 0.05  # Lock in 5% profit with trailing stop
         self.max_take_profit = 0.98  # Let winners run to 98 cents
-        self.stop_loss_pct = 0.50  # 50% loss from entry
+        self.stop_loss_pct = 0.50  # 50% loss from entry (ultimate backstop)
+        self.first_minute_stop_loss_pct = 0.30  # 30% loss within first minute
+        self.first_minute_timeout = 60  # Exit after 60 seconds if not profitable
         self.position_size = 2  # Always trade 2 shares
         self.min_entry_price = 0.10  # Don't enter below 10 cents
         self.max_entry_price = 0.90  # Don't enter above 90 cents
-        self.trade_timeout_seconds = 60  # Kill breakeven trades after 60 seconds
         self.min_minute_in_cycle = 9  # Don't enter in first 9 minutes (minute 12 rule)
         self.price_history = {
             'YES': deque(maxlen=10),  # Last 10 seconds of prices
@@ -246,7 +247,7 @@ class CrashReversalTrader:
                 # Add to history
                 self.add_price_observation(yes_price, no_price)
                 
-                # If in position, monitor for take profit, trailing stop, timeout, and stop loss
+                # If in position, monitor for exits
                 if in_position:
                     current_price = self.get_current_price(entry_token, clob_client)
                     pnl = current_price - entry_price
@@ -273,38 +274,49 @@ class CrashReversalTrader:
                     
                     elapsed = 900 - time_remaining
                     if trailing_stop_active:
-                        print(f"  📊 [{elapsed}s] {entry_side}: ${current_price:.2f} | High: ${highest_price:.2f} | TS: ${trailing_stop_price:.2f} | Max: ${self.max_take_profit:.2f}", end='\r')
+                        print(f"  📊 [{elapsed}s | {int(time_in_trade)}s in trade] {entry_side}: ${current_price:.2f} | High: ${highest_price:.2f} | TS: ${trailing_stop_price:.2f}", end='\r')
                     else:
-                        print(f"  📊 [{elapsed}s] {entry_side}: ${current_price:.2f} | P&L: ${pnl:.2f} ({pnl_pct:+.1f}%) | SL: ${stop_loss_price:.2f} | TP: ${take_profit_price:.2f}", end='\r')
+                        print(f"  📊 [{elapsed}s | {int(time_in_trade)}s in trade] {entry_side}: ${current_price:.2f} | P&L: ${pnl:.2f} ({pnl_pct:+.1f}%)", end='\r')
                     
                     exit_triggered = False
                     exit_reason = None
                     
-                    # Check stop loss FIRST
-                    if current_price <= stop_loss_price:
-                        print(f"\n\n🛑 STOP LOSS HIT at ${current_price:.2f}")
-                        exit_triggered = True
-                        exit_reason = 'STOP_LOSS'
+                    # === FIRST MINUTE RULES (Priority) ===
+                    if time_in_trade <= self.first_minute_timeout:
+                        # Rule 1: Hard stop at 30% loss within first minute
+                        if pnl_pct <= -self.first_minute_stop_loss_pct:
+                            print(f"\n\n🚨 FIRST MINUTE HARD STOP at ${current_price:.2f}")
+                            print(f"   Down {pnl_pct:.1f}% in {int(time_in_trade)}s")
+                            exit_triggered = True
+                            exit_reason = 'FIRST_MINUTE_HARD_STOP'
+                        
+                        # Rule 2: Exit at end of first minute if trailing stop not active
+                        elif time_in_trade >= self.first_minute_timeout and not trailing_stop_active:
+                            print(f"\n\n⏱️  FIRST MINUTE EXIT at ${current_price:.2f}")
+                            print(f"   P&L: {pnl_pct:+.1f}% after 60s (trailing stop not activated)")
+                            exit_triggered = True
+                            exit_reason = 'FIRST_MINUTE_TIMEOUT'
                     
-                    # Check trailing stop (if active)
-                    elif trailing_stop_active and current_price <= trailing_stop_price:
-                        print(f"\n\n📉 TRAILING STOP HIT at ${current_price:.2f}")
-                        print(f"   Highest: ${highest_price:.2f} | Trailing Stop: ${trailing_stop_price:.2f}")
-                        exit_triggered = True
-                        exit_reason = 'TRAILING_STOP'
-                    
-                    # Check max take profit (98 cents)
-                    elif current_price >= self.max_take_profit:
-                        print(f"\n\n🚀 MAX TAKE PROFIT HIT at ${current_price:.2f}")
-                        exit_triggered = True
-                        exit_reason = 'MAX_TAKE_PROFIT'
-                    
-                    # Check 60-second timeout for breakeven trades
-                    elif time_in_trade >= self.trade_timeout_seconds and abs(pnl_pct) < 2:
-                        print(f"\n\n⏱️  60-SECOND TIMEOUT at ${current_price:.2f}")
-                        print(f"   Trade stuck at breakeven for {int(time_in_trade)}s")
-                        exit_triggered = True
-                        exit_reason = 'TIMEOUT_BREAKEVEN'
+                    # === STANDARD RULES (After first minute or if trailing stop active) ===
+                    if not exit_triggered:
+                        # Ultimate stop loss
+                        if current_price <= stop_loss_price:
+                            print(f"\n\n🛑 STOP LOSS HIT at ${current_price:.2f}")
+                            exit_triggered = True
+                            exit_reason = 'STOP_LOSS'
+                        
+                        # Trailing stop (if active)
+                        elif trailing_stop_active and current_price <= trailing_stop_price:
+                            print(f"\n\n📉 TRAILING STOP HIT at ${current_price:.2f}")
+                            print(f"   Highest: ${highest_price:.2f} | Trailing Stop: ${trailing_stop_price:.2f}")
+                            exit_triggered = True
+                            exit_reason = 'TRAILING_STOP'
+                        
+                        # Max take profit (98 cents)
+                        elif current_price >= self.max_take_profit:
+                            print(f"\n\n🚀 MAX TAKE PROFIT HIT at ${current_price:.2f}")
+                            exit_triggered = True
+                            exit_reason = 'MAX_TAKE_PROFIT'
                     
                     if exit_triggered:
                         # Force close position immediately
@@ -475,7 +487,7 @@ def main():
     from py_clob_client.client import ClobClient
     
     print(f"\n{'='*60}")
-    print(f"🔄 CRASH REVERSAL STRATEGY v2.0")
+    print(f"🔄 CRASH REVERSAL STRATEGY v2.1")
     print(f"{'='*60}")
     print(f"Strategy Rules:")
     print(f"  1. Monitor from market start (900s)")
@@ -483,10 +495,13 @@ def main():
     print(f"  3. MINUTE 12 RULE: Only enter after minute 9 in cycle")
     print(f"  4. Enter OPPOSITE side (only if $0.10 - $0.90)")
     print(f"  5. Position Size: 2 shares")
-    print(f"  6. Stop Loss: 50% loss from entry")
-    print(f"  7. Take Profit: 5% initially, then trailing stop")
-    print(f"  8. Trailing Stop: Lock in 5% profit, let winners run to $0.98")
-    print(f"  9. 60-SECOND RULE: Kill breakeven trades after 60s")
+    print(f"\n  FIRST MINUTE RULES (Priority):")
+    print(f"  6a. Hard Stop: Exit if down 30%+ within first minute")
+    print(f"  6b. First Minute Timeout: Exit at 60s if trailing stop not active")
+    print(f"\n  AFTER FIRST MINUTE:")
+    print(f"  7. Stop Loss: 50% loss from entry (ultimate backstop)")
+    print(f"  8. Take Profit: 5% activates trailing stop")
+    print(f"  9. Trailing Stop: Lock in 5% profit, let winners run to $0.98")
     print(f" 10. Detailed CSV logging enabled")
     print(f"{'='*60}\n")
     

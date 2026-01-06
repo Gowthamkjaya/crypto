@@ -21,13 +21,17 @@ class CrashReversalTrader:
     """Trade the reversal after a crash"""
     
     def __init__(self):
-        self.crash_threshold = 0.35  # 35% drop in 5 seconds
+        self.crash_threshold = 0.45  # 45% drop in 5 seconds (avoid dead zone 38-45%)
         self.lookback_seconds = 5
-        self.take_profit_pct = 0.05  # 5% profit from entry
+        self.take_profit_pct = 0.05  # 5% profit from entry (initial target)
+        self.trailing_stop_pct = 0.05  # Lock in 5% profit with trailing stop
+        self.max_take_profit = 0.98  # Let winners run to 98 cents
         self.stop_loss_pct = 0.50  # 50% loss from entry
         self.position_size = 2  # Always trade 2 shares
         self.min_entry_price = 0.10  # Don't enter below 10 cents
         self.max_entry_price = 0.90  # Don't enter above 90 cents
+        self.trade_timeout_seconds = 60  # Kill breakeven trades after 60 seconds
+        self.min_minute_in_cycle = 9  # Don't enter in first 9 minutes (minute 12 rule)
         self.price_history = {
             'YES': deque(maxlen=10),  # Last 10 seconds of prices
             'NO': deque(maxlen=10)
@@ -49,10 +53,13 @@ class CrashReversalTrader:
                 'crashed_side',
                 'entered_side',
                 'crash_percentage',
+                'minute_in_cycle',
                 'entry_time',
                 'entry_price',
                 'stop_loss_price',
-                'take_profit_price',
+                'initial_take_profit_price',
+                'highest_price_reached',
+                'trailing_stop_activated',
                 'exit_time',
                 'exit_price',
                 'exit_reason',
@@ -203,6 +210,10 @@ class CrashReversalTrader:
         take_profit_price = 0
         crashed_side = None
         crash_pct = 0
+        highest_price = 0
+        trailing_stop_active = False
+        trailing_stop_price = 0
+        minute_in_cycle = 0
         
         # Reset price history
         self.price_history = {
@@ -211,7 +222,7 @@ class CrashReversalTrader:
         }
         self.time_history = deque(maxlen=10)
         
-        print(f"👀 Monitoring for crashes (35% drop in 5s)...\n")
+        print(f"👀 Monitoring for crashes (45%+ drop in 5s)...\n")
         
         while True:
             now = int(time.time())
@@ -235,29 +246,65 @@ class CrashReversalTrader:
                 # Add to history
                 self.add_price_observation(yes_price, no_price)
                 
-                # If in position, monitor for take profit and stop loss
+                # If in position, monitor for take profit, trailing stop, timeout, and stop loss
                 if in_position:
                     current_price = self.get_current_price(entry_token, clob_client)
                     pnl = current_price - entry_price
                     pnl_pct = (pnl / entry_price) * 100 if entry_price > 0 else 0
+                    time_in_trade = (datetime.now(timezone.utc) - entry_time).total_seconds()
+                    
+                    # Track highest price
+                    if current_price > highest_price:
+                        highest_price = current_price
+                    
+                    # Activate trailing stop once 5% profit is reached
+                    if not trailing_stop_active and current_price >= take_profit_price:
+                        trailing_stop_active = True
+                        trailing_stop_price = entry_price * (1 + self.trailing_stop_pct)
+                        print(f"\n✨ TRAILING STOP ACTIVATED at ${current_price:.2f}")
+                        print(f"   Trailing Stop: ${trailing_stop_price:.2f} (locked in 5% profit)")
+                        print(f"   Letting winner run to ${self.max_take_profit:.2f}...\n")
+                    
+                    # Update trailing stop as price rises
+                    if trailing_stop_active:
+                        new_trailing_stop = current_price * (1 - self.trailing_stop_pct)
+                        if new_trailing_stop > trailing_stop_price:
+                            trailing_stop_price = new_trailing_stop
                     
                     elapsed = 900 - time_remaining
-                    print(f"  📊 [{elapsed}s] {entry_side}: ${current_price:.2f} | P&L: ${pnl:.2f} ({pnl_pct:+.1f}%) | SL: ${stop_loss_price:.2f} | TP: ${take_profit_price:.2f}", end='\r')
+                    if trailing_stop_active:
+                        print(f"  📊 [{elapsed}s] {entry_side}: ${current_price:.2f} | High: ${highest_price:.2f} | TS: ${trailing_stop_price:.2f} | Max: ${self.max_take_profit:.2f}", end='\r')
+                    else:
+                        print(f"  📊 [{elapsed}s] {entry_side}: ${current_price:.2f} | P&L: ${pnl:.2f} ({pnl_pct:+.1f}%) | SL: ${stop_loss_price:.2f} | TP: ${take_profit_price:.2f}", end='\r')
                     
                     exit_triggered = False
                     exit_reason = None
                     
                     # Check stop loss FIRST
                     if current_price <= stop_loss_price:
-                        print(f"\n\n🛑 STOP LOSS HIT at ${current_price:.2f} (Entry: ${entry_price:.2f})")
+                        print(f"\n\n🛑 STOP LOSS HIT at ${current_price:.2f}")
                         exit_triggered = True
                         exit_reason = 'STOP_LOSS'
                     
-                    # Check take profit (5% from entry)
-                    elif current_price >= take_profit_price:
-                        print(f"\n\n🎯 TAKE PROFIT HIT at ${current_price:.2f} (Target: ${take_profit_price:.2f})")
+                    # Check trailing stop (if active)
+                    elif trailing_stop_active and current_price <= trailing_stop_price:
+                        print(f"\n\n📉 TRAILING STOP HIT at ${current_price:.2f}")
+                        print(f"   Highest: ${highest_price:.2f} | Trailing Stop: ${trailing_stop_price:.2f}")
                         exit_triggered = True
-                        exit_reason = 'TAKE_PROFIT'
+                        exit_reason = 'TRAILING_STOP'
+                    
+                    # Check max take profit (98 cents)
+                    elif current_price >= self.max_take_profit:
+                        print(f"\n\n🚀 MAX TAKE PROFIT HIT at ${current_price:.2f}")
+                        exit_triggered = True
+                        exit_reason = 'MAX_TAKE_PROFIT'
+                    
+                    # Check 60-second timeout for breakeven trades
+                    elif time_in_trade >= self.trade_timeout_seconds and abs(pnl_pct) < 2:
+                        print(f"\n\n⏱️  60-SECOND TIMEOUT at ${current_price:.2f}")
+                        print(f"   Trade stuck at breakeven for {int(time_in_trade)}s")
+                        exit_triggered = True
+                        exit_reason = 'TIMEOUT_BREAKEVEN'
                     
                     if exit_triggered:
                         # Force close position immediately
@@ -295,10 +342,13 @@ class CrashReversalTrader:
                                 'crashed_side': crashed_side,
                                 'entered_side': entry_side,
                                 'crash_percentage': f"{crash_pct:.2%}",
+                                'minute_in_cycle': minute_in_cycle,
                                 'entry_time': entry_time.isoformat(),
                                 'entry_price': f"{entry_price:.4f}",
                                 'stop_loss_price': f"{stop_loss_price:.4f}",
-                                'take_profit_price': f"{take_profit_price:.4f}",
+                                'initial_take_profit_price': f"{take_profit_price:.4f}",
+                                'highest_price_reached': f"{highest_price:.4f}",
+                                'trailing_stop_activated': trailing_stop_active,
                                 'exit_time': exit_time.isoformat(),
                                 'exit_price': f"{actual_exit:.4f}",
                                 'exit_reason': exit_reason,
@@ -320,6 +370,10 @@ class CrashReversalTrader:
                             take_profit_price = 0
                             crashed_side = None
                             crash_pct = 0
+                            highest_price = 0
+                            trailing_stop_active = False
+                            trailing_stop_price = 0
+                            minute_in_cycle = 0
                             
                             print(f"👀 Resuming crash monitoring...\n")
                         else:
@@ -328,16 +382,28 @@ class CrashReversalTrader:
                 
                 # If NOT in position, look for crash
                 else:
+                    # Calculate minute in cycle (0-14)
+                    current_minute_in_cycle = ((900 - time_remaining) // 60) % 15
+                    
                     detected_crash_side, detected_crash_pct = self.detect_crash()
                     
                     if detected_crash_side:
+                        # Check minute-in-cycle rule FIRST
+                        if current_minute_in_cycle <= self.min_minute_in_cycle:
+                            print(f"\n⚠️  Crash detected but in FIRST 3 MINUTES (minute {current_minute_in_cycle})")
+                            print(f"   Waiting until minute >{self.min_minute_in_cycle} to enter trades")
+                            print(f"   Skipping this crash...\n")
+                            continue
+                        
                         trade_count += 1
+                        minute_in_cycle = current_minute_in_cycle
                         
                         print(f"\n{'='*60}")
                         print(f"🚨 CRASH #{trade_count} DETECTED!")
                         print(f"{'='*60}")
                         print(f"   Side: {detected_crash_side}")
                         print(f"   Drop: {detected_crash_pct:.1%}")
+                        print(f"   Minute in Cycle: {minute_in_cycle}")
                         print(f"   YES Price: ${yes_price:.2f}")
                         print(f"   NO Price: ${no_price:.2f}")
                         print(f"{'='*60}\n")
@@ -409,16 +475,19 @@ def main():
     from py_clob_client.client import ClobClient
     
     print(f"\n{'='*60}")
-    print(f"🔄 CRASH REVERSAL STRATEGY")
+    print(f"🔄 CRASH REVERSAL STRATEGY v2.0")
     print(f"{'='*60}")
-    print(f"Strategy:")
+    print(f"Strategy Rules:")
     print(f"  1. Monitor from market start (900s)")
-    print(f"  2. Detect 35% crash in 5 seconds")
-    print(f"  3. Enter OPPOSITE side (only if $0.10 - $0.90)")
-    print(f"  4. Position Size: 2 shares")
-    print(f"  5. Stop Loss: 50% loss from entry")
-    print(f"  6. Take Profit: 5% gain from entry")
-    print(f"  7. Detailed CSV logging enabled")
+    print(f"  2. Detect 45%+ crash in 5 seconds (avoid 38-45% dead zone)")
+    print(f"  3. MINUTE 12 RULE: Only enter after minute 9 in cycle")
+    print(f"  4. Enter OPPOSITE side (only if $0.10 - $0.90)")
+    print(f"  5. Position Size: 2 shares")
+    print(f"  6. Stop Loss: 50% loss from entry")
+    print(f"  7. Take Profit: 5% initially, then trailing stop")
+    print(f"  8. Trailing Stop: Lock in 5% profit, let winners run to $0.98")
+    print(f"  9. 60-SECOND RULE: Kill breakeven trades after 60s")
+    print(f" 10. Detailed CSV logging enabled")
     print(f"{'='*60}\n")
     
     trader = CrashReversalTrader()

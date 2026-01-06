@@ -17,7 +17,7 @@ class ScalpingBot:
     """Simple 98-to-99 scalping strategy"""
     
     def __init__(self):
-        self.entry_price = 0.98  # Enter at exactly 98 cents
+        self.entry_price = 0.94  # Enter at exactly 98 cents
         self.take_profit = 0.99  # Exit at 99 cents
         self.stop_loss = 0.90  # Stop loss at 90 cents
         self.position_size = 2  # Trade 2 shares

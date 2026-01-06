@@ -17,12 +17,11 @@ class ScalpingBot:
     """Simple 98-to-99 scalping strategy"""
     
     def __init__(self):
-        self.entry_price = 0.99  # Enter at exactly 98 cents
-        self.take_profit = 1.00  # Exit at 99 cents
-        self.stop_loss = 0.95  # Stop loss at 90 cents
-        self.position_size = 2  # Trade 2 shares
-        self.last_minutes_threshold = 180  # Last 3 minutes (180 seconds)
-        self.log_file = "scalping_98_99_trades.csv"
+        self.entry_price_target = 0.99  # Enter when side hits 99 cents
+        self.stop_loss = 0.80  # Stop loss at 80 cents
+        self.position_size = 5  # Minimum 5 shares
+        self.last_minutes_threshold = 120  # Last 2 minutes (120 seconds)
+        self.log_file = "scalping_99_hold_trades.csv"
         
         # Initialize CSV log
         self.initialize_log()
@@ -40,7 +39,6 @@ class ScalpingBot:
                 'entry_time',
                 'entry_price',
                 'stop_loss_price',
-                'take_profit_price',
                 'exit_time',
                 'exit_price',
                 'exit_reason',
@@ -76,8 +74,8 @@ class ScalpingBot:
         except:
             return 0
     
-    def place_limit_order(self, clob_client, token_id, side, price, size=None, max_wait=10):
-        """Place GTC limit order at exact price and wait for fill"""
+    def place_market_order(self, clob_client, token_id, side, size=None, max_retries=10):
+        """Place FOK market order with aggressive retries"""
         if size is None:
             size = self.position_size
             
@@ -85,54 +83,70 @@ class ScalpingBot:
             from py_clob_client.clob_types import OrderArgs, OrderType
             from py_clob_client.order_builder.constants import BUY as PY_BUY, SELL as PY_SELL
             
-            print(f"  📝 Placing limit order: {side} {size} @ ${price:.2f}")
-            
-            order_args = OrderArgs(
-                price=price,
-                size=size,
-                side=PY_BUY if side == 'BUY' else PY_SELL,
-                token_id=token_id
-            )
-            
-            signed_order = clob_client.create_order(order_args)
-            resp = clob_client.post_order(signed_order, OrderType.GTC)
-            
-            if not resp or not hasattr(resp, 'order_id'):
-                print(f"  ❌ Order placement failed")
-                return None, None
-            
-            order_id = resp.order_id
-            print(f"  ⏳ Order posted (ID: {order_id[:8]}...), waiting for fill...")
-            
-            # Wait for order to fill
-            for i in range(max_wait * 2):  # Check every 0.5s
-                time.sleep(0.5)
-                try:
-                    order_status = clob_client.get_order(order_id)
-                    
-                    if order_status and hasattr(order_status, 'status'):
-                        if order_status.status == 'MATCHED':
-                            fill_price = float(order_status.price) if hasattr(order_status, 'price') else price
-                            print(f"  ✅ Order filled: {side} {size} @ ${fill_price:.2f}")
-                            return resp, fill_price
-                except Exception as e:
-                    pass
+            for attempt in range(max_retries):
+                book = clob_client.get_order_book(token_id)
                 
-                if i % 4 == 0:
-                    print(".", end='', flush=True)
+                if side == 'BUY':
+                    if not book.asks:
+                        time.sleep(0.2)
+                        continue
+                    # Use best ask for market buy
+                    price = min(float(o.price) for o in book.asks)
+                else:
+                    if not book.bids:
+                        time.sleep(0.2)
+                        continue
+                    # Use best bid for market sell
+                    price = max(float(o.price) for o in book.bids)
+                
+                order_args = OrderArgs(
+                    price=price,
+                    size=size,
+                    side=PY_BUY if side == 'BUY' else PY_SELL,
+                    token_id=token_id
+                )
+                
+                signed_order = clob_client.create_order(order_args)
+                
+                try:
+                    resp = clob_client.post_order(signed_order, OrderType.FOK)
+                    
+                    if isinstance(resp, dict):
+                        if resp.get('success') or resp.get('status') == 'matched':
+                            print(f"  ✅ Order filled: {side} {size} @ ${price:.2f}")
+                            return resp, price
+                    elif resp and hasattr(resp, 'success'):
+                        if resp.success:
+                            print(f"  ✅ Order filled: {side} {size} @ ${price:.2f}")
+                            return resp, price
+                    
+                except Exception as e:
+                    if "couldn't be fully filled" in str(e) or "lower than the minimum" in str(e):
+                        print(f"  ⏳ Retry {attempt + 1}/{max_retries}...", end='\r')
+                        time.sleep(0.1)
+                        continue
+                    else:
+                        print(f"  ⚠️  Error: {e}")
+                        time.sleep(0.2)
+                        continue
             
-            # Order didn't fill in time, cancel it
-            print(f"\n  ⏱️  Order not filled after {max_wait}s, cancelling...")
-            try:
-                clob_client.cancel(order_id)
-            except:
-                pass
-            
+            print(f"\n  ❌ Failed after {max_retries} attempts")
             return None, None
             
         except Exception as e:
             print(f"  ❌ Order error: {e}")
             return None, None
+    
+    def claim_winnings(self, clob_client):
+        """Claim all outstanding winnings"""
+        try:
+            print(f"\n💰 Claiming outstanding winnings...")
+            # This would require accessing the conditional tokens contract
+            # For now, just report current balance
+            print(f"  ℹ️  Manual claiming: Check your Polymarket account to claim wins")
+            print(f"  ℹ️  Wins are typically claimed automatically on settlement\n")
+        except Exception as e:
+            print(f"  ⚠️  Error: {e}\n")
     
     def trade_market(self, market, clob_client):
         """Main trading logic"""
@@ -162,8 +176,7 @@ class ScalpingBot:
                 print(f"\n⏰ Market closed. Trades executed: {trade_count}")
                 if in_position:
                     print(f"⚠️  Still in position - emergency closing...")
-                    current_price = self.get_current_price(entry_token, clob_client)
-                    self.place_limit_order(clob_client, entry_token, 'SELL', current_price)
+                    self.place_market_order(clob_client, entry_token, 'SELL')
                 return
             
             try:
@@ -174,51 +187,29 @@ class ScalpingBot:
                 yes_price = max(float(o.price) for o in yes_book.bids) if yes_book.bids else 0
                 no_price = max(float(o.price) for o in no_book.bids) if no_book.bids else 0
                 
-                # If in position, monitor for exit
+                # If in position, monitor for stop loss only (hold till end otherwise)
                 if in_position:
                     current_price = self.get_current_price(entry_token, clob_client)
                     pnl = current_price - entry_price
                     pnl_pct = (pnl / entry_price) * 100 if entry_price > 0 else 0
                     time_in_trade = (datetime.now(timezone.utc) - entry_time).total_seconds()
                     
-                    print(f"  📊 [{int(time_in_trade)}s] {entry_side}: ${current_price:.2f} | P&L: ${pnl:.2f} ({pnl_pct:+.1f}%) | Target: ${self.take_profit:.2f}", end='\r')
+                    print(f"  📊 [{int(time_in_trade)}s | {time_remaining}s left] {entry_side}: ${current_price:.2f} | P&L: ${pnl:.2f} ({pnl_pct:+.1f}%) | SL: ${self.stop_loss:.2f}", end='\r')
                     
                     exit_triggered = False
                     exit_reason = None
                     
-                    # Check stop loss
+                    # Only check stop loss
                     if current_price <= self.stop_loss:
                         print(f"\n\n🛑 STOP LOSS HIT at ${current_price:.2f}")
                         exit_triggered = True
                         exit_reason = 'STOP_LOSS'
                     
-                    # Check take profit
-                    elif current_price >= self.take_profit:
-                        print(f"\n\n🎯 TAKE PROFIT HIT at ${current_price:.2f}")
-                        exit_triggered = True
-                        exit_reason = 'TAKE_PROFIT'
-                    
                     if exit_triggered:
-                        # Force close position with limit order at take profit price
-                        print(f"🔚 Closing position with limit order @ ${self.take_profit:.2f}...")
+                        # Close position with market order
+                        print(f"🔚 Closing position...")
                         exit_time = datetime.now(timezone.utc)
-                        
-                        if exit_reason == 'TAKE_PROFIT':
-                            # Use limit order at 0.99 for take profit
-                            close_order, close_price = self.place_limit_order(
-                                clob_client, 
-                                entry_token, 
-                                'SELL', 
-                                self.take_profit  # Exact price: 0.99
-                            )
-                        else:
-                            # Use limit order at current price for stop loss
-                            close_order, close_price = self.place_limit_order(
-                                clob_client, 
-                                entry_token, 
-                                'SELL', 
-                                current_price  # Current market price
-                            )
+                        close_order, close_price = self.place_market_order(clob_client, entry_token, 'SELL')
                         
                         if close_order:
                             actual_exit = close_price if close_price else current_price
@@ -251,7 +242,6 @@ class ScalpingBot:
                                 'entry_time': entry_time.isoformat(),
                                 'entry_price': f"{entry_price:.4f}",
                                 'stop_loss_price': f"{self.stop_loss:.4f}",
-                                'take_profit_price': f"{self.take_profit:.4f}",
                                 'exit_time': exit_time.isoformat(),
                                 'exit_price': f"{actual_exit:.4f}",
                                 'exit_reason': exit_reason,
@@ -277,10 +267,10 @@ class ScalpingBot:
                 
                 # If NOT in position, look for entry
                 else:
-                    # Only enter in last 3 minutes
+                    # Only enter in last 2 minutes
                     if time_remaining <= self.last_minutes_threshold:
-                        # Check if YES is at exactly 0.98
-                        if abs(yes_price - self.entry_price) < 0.001:  # Within 0.1 cent
+                        # Check if YES is at 99 cents or higher
+                        if yes_price >= self.entry_price_target:
                             trade_count += 1
                             entry_side = 'YES'
                             entry_token = market['yes_token']
@@ -293,29 +283,24 @@ class ScalpingBot:
                             print(f"  Time Remaining: {time_remaining}s")
                             print(f"{'='*60}\n")
                             
-                            print(f"💸 Entering {entry_side} at ${yes_price:.2f}...")
+                            print(f"💸 Entering {entry_side} at market...")
                             
                             entry_time = datetime.now(timezone.utc)
                             time_remaining_at_entry = time_remaining
-                            order, entry_price = self.place_limit_order(
-                                clob_client, 
-                                entry_token, 
-                                'BUY', 
-                                self.entry_price  # Exact price: 0.98
-                            )
+                            order, entry_price = self.place_market_order(clob_client, entry_token, 'BUY')
                             
                             if order:
                                 in_position = True
                                 print(f"\n📈 Position opened!")
                                 print(f"   Entry: ${entry_price:.2f}")
                                 print(f"   Stop Loss: ${self.stop_loss:.2f}")
-                                print(f"   Take Profit: ${self.take_profit:.2f}\n")
+                                print(f"   Strategy: HOLD till market end or stop loss\n")
                             else:
                                 print(f"  ❌ Failed to enter\n")
                                 trade_count -= 1
                         
-                        # Check if NO is at exactly 0.98
-                        elif abs(no_price - self.entry_price) < 0.001:  # Within 0.1 cent
+                        # Check if NO is at 99 cents or higher
+                        elif no_price >= self.entry_price_target:
                             trade_count += 1
                             entry_side = 'NO'
                             entry_token = market['no_token']
@@ -328,34 +313,29 @@ class ScalpingBot:
                             print(f"  Time Remaining: {time_remaining}s")
                             print(f"{'='*60}\n")
                             
-                            print(f"💸 Entering {entry_side} at ${no_price:.2f}...")
+                            print(f"💸 Entering {entry_side} at market...")
                             
                             entry_time = datetime.now(timezone.utc)
                             time_remaining_at_entry = time_remaining
-                            order, entry_price = self.place_limit_order(
-                                clob_client, 
-                                entry_token, 
-                                'BUY', 
-                                self.entry_price  # Exact price: 0.98
-                            )
+                            order, entry_price = self.place_market_order(clob_client, entry_token, 'BUY')
                             
                             if order:
                                 in_position = True
                                 print(f"\n📈 Position opened!")
                                 print(f"   Entry: ${entry_price:.2f}")
                                 print(f"   Stop Loss: ${self.stop_loss:.2f}")
-                                print(f"   Take Profit: ${self.take_profit:.2f}\n")
+                                print(f"   Strategy: HOLD till market end or stop loss\n")
                             else:
                                 print(f"  ❌ Failed to enter\n")
                                 trade_count -= 1
                         else:
                             # Display monitoring
-                            print(f"  ⏱️  [{time_remaining}s] YES: ${yes_price:.2f} | NO: ${no_price:.2f} | Waiting for $0.98...", end='\r')
+                            print(f"  ⏱️  [{time_remaining}s] YES: ${yes_price:.2f} | NO: ${no_price:.2f} | Waiting for $0.99...", end='\r')
                     else:
-                        # Still waiting for last 3 minutes
+                        # Still waiting for last 2 minutes
                         mins = time_remaining // 60
                         secs = time_remaining % 60
-                        print(f"  ⏰ [{mins}m {secs}s] YES: ${yes_price:.2f} | NO: ${no_price:.2f} | Waiting for last 3 min...", end='\r')
+                        print(f"  ⏰ [{mins}m {secs}s] YES: ${yes_price:.2f} | NO: ${no_price:.2f} | Waiting for last 2 min...", end='\r')
                 
             except Exception as e:
                 print(f"\n⚠️  Error: {e}")
@@ -369,14 +349,14 @@ def main():
     from py_clob_client.client import ClobClient
     
     print(f"\n{'='*60}")
-    print(f"💰 98-TO-99 SCALPING STRATEGY")
+    print(f"💰 99-CENT HOLD STRATEGY")
     print(f"{'='*60}")
     print(f"Strategy:")
-    print(f"  1. Wait for last 3 minutes (180s remaining)")
-    print(f"  2. Enter side at exactly $0.98")
-    print(f"  3. Exit at $0.99 (1 cent profit)")
-    print(f"  4. Stop loss: $0.90")
-    print(f"  5. Position size: 2 shares")
+    print(f"  1. Wait for last 2 minutes (120s remaining)")
+    print(f"  2. Enter side at $0.99+ (market order)")
+    print(f"  3. HOLD till market end (no take profit)")
+    print(f"  4. Stop loss: $0.80")
+    print(f"  5. Position size: 5 shares (minimum)")
     print(f"  6. Detailed CSV logging enabled")
     print(f"{'='*60}\n")
     

@@ -42,7 +42,7 @@ else:
 # ==========================================
 # 🛠️ GLOBAL TRADING VARIABLES
 # ==========================================
-TRADE_SIDE = "BOTH"         # Options: "YES", "NO", or "BOTH"
+TRADE_SIDE = "NO"         # Options: "YES", "NO", or "BOTH"
 ENTRY_PRICE = 0.96        # Target entry price (bid must be >= this)
 STOP_LOSS_PRICE = 0.73    # Trigger for the sustained stop loss
 SUSTAIN_TIME = 3          # Seconds price must stay below SL to trigger
@@ -801,5 +801,6 @@ class EthNoTrendBot:
 if __name__ == "__main__":
 
     EthNoTrendBot().run()
+
 
 

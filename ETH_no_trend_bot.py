@@ -72,7 +72,7 @@ init_log()
 HOST = "https://clob.polymarket.com"
 DATA_API_URL = "https://data-api.polymarket.com"
 CHAIN_ID = 137
-RPC_URL = "https://polygon-mainnet.g.alchemy.com/v2/BAkKqoHrx_codLcJVeGmH" # private polygon RPC
+RPC_URL = "https://polygon-mainnet.g.alchemy.com/v2/Vwy188P6gCu8mAUrbObWH"
 
 
 class EthNoTrendBot:
@@ -801,3 +801,4 @@ class EthNoTrendBot:
 if __name__ == "__main__":
 
     EthNoTrendBot().run()
+

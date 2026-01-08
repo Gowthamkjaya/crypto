@@ -23,8 +23,11 @@ class OrderOptions:
 # ==========================================
 # 🛠️ USER CONFIGURATION
 # ==========================================
-PRIVATE_KEY = "0x6cbe6580d99aa3a3bf1d7d93e5df6024d8d1cedb080526f4c834196fa2fe156f"
-POLYMARKET_ADDRESS = "0x6C83e9bd90C67fDb623ff6E46f6Ef8C4EC5A1cba"
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+if not PRIVATE_KEY:
+    raise ValueError("❌ PRIVATE_KEY not found in environment variables!")
+    
+POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
 
 wallet = Account.from_key(PRIVATE_KEY)
 if wallet.address.lower() == POLYMARKET_ADDRESS.lower():
@@ -796,4 +799,5 @@ class EthNoTrendBot:
                 time.sleep(3)
 
 if __name__ == "__main__":
+
     EthNoTrendBot().run()

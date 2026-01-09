@@ -419,6 +419,16 @@ class EthNoTrendBot:
             yes_ask_size = yes_book['ask_size'] if yes_book['ask_size'] else 0
             no_ask_size = no_book['ask_size'] if no_book['ask_size'] else 0
             
+            # Check if either ask price exceeds $0.99 - if so, skip this market
+            if (yes_ask is not None and yes_ask > 0.99) or (no_ask is not None and no_ask > 0.99):
+                print(f"\n⚠️ Market unfavorable: YES ask ${yes_ask:.2f}, NO ask ${no_ask:.2f} (>$0.99 threshold)")
+                print(f"   🚫 Skipping this market and moving to next.")
+                log_rec['Final_Status'] = 'SKIPPED'
+                log_rec['notes'] = f'Ask prices exceeded $0.99 threshold (YES: ${yes_ask:.2f}, NO: ${no_ask:.2f})'
+                self.save_log(log_rec)
+                self.traded_markets.add(slug)
+                return
+            
             # Display current prices (single line update)
             if TRADE_SIDE == "YES":
                 print(f"Monitoring YES | Bid: ${yes_bid:.2f} | Ask: ${yes_ask:.2f} ({yes_ask_size}) | Target Bid: ${ENTRY_PRICE}   ", end='\r')
@@ -801,6 +811,3 @@ class EthNoTrendBot:
 if __name__ == "__main__":
 
     EthNoTrendBot().run()
-
-
-

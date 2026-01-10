@@ -11,6 +11,41 @@ from py_clob_client.clob_types import OrderArgs, OrderType, PostOrdersArgs
 from py_clob_client.order_builder.constants import BUY, SELL
 from datetime import datetime, timedelta, timezone
 from eth_account import Account
+import sys
+
+# ==========================================
+# 📝 DUAL LOGGER CLASS - Console + File
+# ==========================================
+class DualLogger:
+    """Captures all console output to both terminal and log file"""
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, 'a', encoding='utf-8')
+        self.log.write(f"\n{'='*60}\n")
+        self.log.write(f"LOG SESSION STARTED: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        self.log.write(f"{'='*60}\n\n")
+        
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()  # Ensure immediate write to file
+        
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+    
+    def close(self):
+        self.log.close()
+
+# Initialize dual logging - creates timestamped log file
+LOG_FILENAME = f"ETH_NO_trend_bot_terminal_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+dual_logger = DualLogger(LOG_FILENAME)
+sys.stdout = dual_logger
+sys.stderr = dual_logger
+
+print(f"{'='*60}")
+print(f"📝 Terminal Logging Active: {LOG_FILENAME}")
+print(f"{'='*60}\n")
 
 # ==========================================
 # 🔧 MANUAL FIX for OrderOptions
@@ -23,11 +58,9 @@ class OrderOptions:
 # ==========================================
 # 🛠️ USER CONFIGURATION
 # ==========================================
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")
-if not PRIVATE_KEY:
-    raise ValueError("❌ PRIVATE_KEY not found in environment variables!")
-    
+PRIVATE_KEY = "0xbbd185bb356315b5f040a2af2fa28549177f3087559bb76885033e9cf8e8bf34"
 POLYMARKET_ADDRESS = "0xC47167d407A91965fAdc7aDAb96F0fF586566bF7"
+
 
 wallet = Account.from_key(PRIVATE_KEY)
 if wallet.address.lower() == POLYMARKET_ADDRESS.lower():
@@ -42,18 +75,19 @@ else:
 # ==========================================
 # 🛠️ GLOBAL TRADING VARIABLES
 # ==========================================
-TRADE_SIDE = "NO"         # Options: "YES", "NO", or "BOTH"
-ENTRY_PRICE = 0.96        # Target entry price (bid must be >= this)
-STOP_LOSS_PRICE = 0.73    # Trigger for the sustained stop loss
-SUSTAIN_TIME = 3          # Seconds price must stay below SL to trigger
-POSITION_SIZE = 5        # Number of shares per trade
-MARKET_WINDOW = 240       # Only trade within the last 180 seconds
-POLLING_INTERVAL = 1      # Frequency of price checks (seconds)
-ENTRY_TIMEOUT = 210       # Max seconds to wait for entry order to fill
-SL_TIMEOUT = 10           # Max seconds for stop loss liquidation
+TRADE_SIDE = "BOTH"         # Options: "YES", "NO", or "BOTH"
+ENTRY_PRICE = 0.96          # Target entry price (bid must be >= this)
+STOP_LOSS_PRICE = 0.89      # Trigger for the sustained stop loss
+SUSTAIN_TIME = 3            # Seconds price must stay below SL to trigger
+POSITION_SIZE = 25          # Number of shares per trade
+MARKET_WINDOW = 240         # Only trade within the last 240 seconds
+POLLING_INTERVAL = 1        # Frequency of price checks (seconds)
+ENTRY_TIMEOUT = 210         # Max seconds to wait for entry order to fill
+SL_TIMEOUT = 10             # Max seconds for stop loss liquidation 
+ABORT_ASK_PRICE = 0.99      # 🚨 NEW: Abort market if ASK exceeds this
 
 # ==========================================
-# 📊 LOGGING CONFIGURATION
+# 📊 CSV TRADING LOG CONFIGURATION
 # ==========================================
 LOG_FILE = "ETH_NO_trading_log.csv"
 
@@ -72,7 +106,7 @@ init_log()
 HOST = "https://clob.polymarket.com"
 DATA_API_URL = "https://data-api.polymarket.com"
 CHAIN_ID = 137
-RPC_URL = "https://polygon-mainnet.g.alchemy.com/v2/Vwy188P6gCu8mAUrbObWH"
+RPC_URL = "https://polygon-mainnet.g.alchemy.com/v2/Vwy188P6gCu8mAUrbObWH" # private polygon RPC
 
 
 class EthNoTrendBot:
@@ -83,7 +117,8 @@ class EthNoTrendBot:
         print(f"   Entry Price: ${ENTRY_PRICE}")
         print(f"   Stop Loss: ${STOP_LOSS_PRICE}")
         print(f"   Position Size: {POSITION_SIZE} shares")
-        print(f"   Trading Window: Last {MARKET_WINDOW}s of market\n")
+        print(f"   Trading Window: Last {MARKET_WINDOW}s of market")
+        print(f"   🚨 ABORT Trigger: ASK > ${ABORT_ASK_PRICE}\n")
         
         # Validate TRADE_SIDE input
         if TRADE_SIDE not in ["YES", "NO", "BOTH"]:
@@ -118,7 +153,7 @@ class EthNoTrendBot:
                     record.get('Final_Status', '-'), record.get('notes', '-'), record.get('is_SL_Triggered', '-')
                 ])
         except Exception as e:
-            print(f"❌ Logging Error: {e}")
+            print(f"❌ CSV Logging Error: {e}")
 
     def floor_round(self, n, decimals=1):
         multiplier = 10 ** decimals
@@ -134,22 +169,18 @@ class EthNoTrendBot:
                 print(f"🔍 Accessing Data API for position verification (Attempt {attempt+1}/5)...")
                 balances = {"yes": 0.0, "no": 0.0}
                 url = f"{DATA_API_URL}/positions?user={TRADING_ADDRESS}"
-                
                 resp = requests.get(url, timeout=3).json()
                 
                 for pos in resp:
                     asset = pos.get('asset')
                     size = self.floor_round(float(pos.get('size', 0)), 1)
-                    
                     if asset == yes_token: 
                         balances["yes"] = size
                         print(f"    📊 YES Position: {size} shares")
                     elif asset == no_token: 
                         balances["no"] = size
                         print(f"    📊 NO Position: {size} shares")
-                
                 return balances
-
             except Exception as e:
                 print(f"⚠️ Balance API attempt {attempt+1} failed: {e}")
                 if attempt < 4:
@@ -214,9 +245,9 @@ class EthNoTrendBot:
             
             if resp and len(resp) > 0:
                 response_obj = resp[0]
-                
                 if response_obj.get('orderID'):
                     order_id = response_obj.get('orderID')
+                    print(f"   🆔 Order Placed! ID: {order_id}")
                 else:
                     error_msg = response_obj.get('errorMsg', 'Unknown error')
                     print(f"   ⚠️ Order Rejected: {error_msg}")
@@ -224,7 +255,6 @@ class EthNoTrendBot:
             else:
                 print(f"   ⚠️ Empty response from API")
                 return None, None
-                    
         except Exception as e:
             print(f"   ❌ API Exception: {type(e).__name__}: {e}")
             if "404" in str(e) or "Not Found" in str(e):
@@ -240,15 +270,27 @@ class EthNoTrendBot:
                 elapsed = time.time() - start_time
                 if elapsed > timeout:
                     print(f"🛑 TIMEOUT: Exceeded during FOK indexing wait.")
+                    try:
+                        self.client.cancel(order_id)
+                    except:
+                        pass
                     return None, "TIMEOUT"
-                sleep_time = min(1.5, timeout - elapsed)
+                sleep_time = min(2, timeout - elapsed)
                 if sleep_time > 0:
+                    print(f"   ⏳ Waiting {sleep_time:.1f}s for order indexing...")
                     time.sleep(sleep_time)
             else:
-                time.sleep(1.5)
+                print(f"   ⏳ Waiting 2s for order indexing...")
+                time.sleep(2)
 
-        # MONITORING PHASE - Poll until filled or timeout
-        while True:
+        # COMPREHENSIVE MONITORING PHASE
+        print(f"   🔍 Monitoring order {order_id} status...")
+        max_status_checks = 10
+        check_count = 0
+        
+        while check_count < max_status_checks:
+            check_count += 1
+            
             # Timeout check during monitoring
             if start_time and timeout:
                 elapsed = time.time() - start_time
@@ -269,13 +311,20 @@ class EthNoTrendBot:
 
             # Handle API errors
             if fill_data == "ERROR":
-                print(f"⚠️ API ERROR: Lost connection during {label} status check.")
-                return None, None
+                print(f"⚠️ API ERROR: Lost connection during {label} status check (attempt {check_count}/{max_status_checks})")
+                if check_count < max_status_checks:
+                    time.sleep(1)
+                    continue
+                else:
+                    return None, None
 
             # FOK-specific handling
             if order_type == OrderType.FOK:
                 status_str = str(fill_data).upper()
+                
                 if status_str in ["PENDING", "MATCHED", "OPEN"]:
+                    print(f"   ⏳ FOK status: {status_str} (check {check_count}/{max_status_checks})")
+                    
                     # Check timeout before waiting
                     if start_time and timeout:
                         elapsed = time.time() - start_time
@@ -299,12 +348,26 @@ class EthNoTrendBot:
                     if filled:
                         print(f"🎊 EXECUTED: {side} {label} filled at ${fill_data:.2f}")
                         return order_id, fill_data
+                    
+                    # Still pending - continue monitoring loop
+                    continue
                 
-                print(f"   ⚠️ FOK Failed. Status: {fill_data}")
+                # FOK in terminal state (CANCELLED, EXPIRED, etc)
+                print(f"   ⚠️ FOK Failed. Final Status: {fill_data}")
                 return None, None
 
-            print(f"   ⏳ {side} Limit Order still open (Status: {fill_data})...", end='\r')
+            # GTC order still open
+            print(f"   ⏳ {side} Limit Order still open: {fill_data} (check {check_count}/{max_status_checks})", end='\r')
             time.sleep(2)
+        
+        # Max checks reached without fill
+        print(f"\n   ⚠️ Order {order_id} not filled after {max_status_checks} status checks")
+        try:
+            self.client.cancel(order_id)
+            print(f"   🚫 Cancelled order {order_id}")
+        except:
+            pass
+        return None, None
 
     def persistent_liquidation(self, token_id, side_name, market):
         print(f"⚠️ Initializing Persistent Liquidation for {side_name}...")
@@ -312,14 +375,7 @@ class EthNoTrendBot:
         while True:
             # 1. Verify current shares
             bal_check = self.get_all_shares_available(market['yes_token'], market['no_token'])
-            
-            # Get the correct balance based on side
-            if side_name == 'YES':
-                current_shares = bal_check['yes']
-            elif side_name == 'NO':
-                current_shares = bal_check['no']
-            else:
-                current_shares = 0
+            current_shares = bal_check['yes'] if side_name == 'YES' else bal_check['no']
             
             if current_shares <= 0:
                 print(f"✅ Liquidation Complete: No remaining {side_name} shares found.")
@@ -328,15 +384,14 @@ class EthNoTrendBot:
             # 2. Fetch latest Best Bid
             bid_data = self.get_order_book_depth(token_id)
             if not bid_data or not bid_data['best_bid']:
-                print("   ⏳ No active bids found. Retrying in 1s...")
+                print("   ⏳ No active bids found. Retrying in 0.5s...")
                 time.sleep(0.5)
                 continue
             
             # 3. Attempt FOK Sell at current Best Bid
             print(f"   🔄 Attempting liquidation: {current_shares} shares @ ${bid_data['best_bid']}")
             res_id, res_price = self.place_order_with_validation(
-                token_id, bid_data['best_bid'], 
-                current_shares, SELL, OrderType.FOK
+                token_id, bid_data['best_bid'], current_shares, SELL, OrderType.FOK
             )
             
             # 4. Success check
@@ -349,6 +404,7 @@ class EthNoTrendBot:
 
     def monitor_market(self, market_data, market_start_time):
         """The main loop for monitoring the trading window and executing the strategy."""
+        global POSITION_SIZE
         slug = market_data['slug']
         
         # Check if already traded
@@ -419,17 +475,15 @@ class EthNoTrendBot:
             yes_ask_size = yes_book['ask_size'] if yes_book['ask_size'] else 0
             no_ask_size = no_book['ask_size'] if no_book['ask_size'] else 0
             
-            # Check if either ask price exceeds $0.99 - if so, skip this market
-            if (yes_ask is not None and yes_ask > 0.99) or (no_ask is not None and no_ask > 0.99):
-                print(f"\n⚠️ Market unfavorable: YES ask ${yes_ask:.2f}, NO ask ${no_ask:.2f} (>$0.99 threshold)")
-                print(f"   🚫 Skipping this market and moving to next.")
-                log_rec['Final_Status'] = 'SKIPPED'
-                log_rec['notes'] = f'Ask prices exceeded $0.99 threshold (YES: ${yes_ask:.2f}, NO: ${no_ask:.2f})'
-                self.save_log(log_rec)
+            # 🚨 ABORT CHECK - Skip market immediately if ASK exceeds threshold
+            if yes_ask > ABORT_ASK_PRICE or no_ask > ABORT_ASK_PRICE:
+                print(f"\n🚨 ABORT TRIGGERED: ASK price exceeded ${ABORT_ASK_PRICE}")
+                print(f"   YES ASK: ${yes_ask:.2f} | NO ASK: ${no_ask:.2f}")
+                print(f"   ⏭️ Skipping market {slug} and waiting for next market...\n")
+                
                 self.traded_markets.add(slug)
                 return
             
-            # Display current prices (single line update)
             if TRADE_SIDE == "YES":
                 print(f"Monitoring YES | Bid: ${yes_bid:.2f} | Ask: ${yes_ask:.2f} ({yes_ask_size}) | Target Bid: ${ENTRY_PRICE}   ", end='\r')
             elif TRADE_SIDE == "NO":
@@ -461,11 +515,11 @@ class EthNoTrendBot:
                 if yes_valid and no_valid:
                     print(f"\n⚡ BOTH sides valid! Choosing based on bid strength...")
                     if yes_bid >= no_bid:
-                        print(f"   → Selected YES (Bid ${yes_bid:.2f} >= NO Bid ${no_bid:.2f})")
+                        print(f"   → Selected YES (Bid ${yes_bid:.2f})")
                         triggered_side = "YES"
                         triggered_token = yes_token
                     else:
-                        print(f"   → Selected NO (Bid ${no_bid:.2f} > YES Bid ${yes_bid:.2f})")
+                        print(f"   → Selected NO (Bid ${no_bid:.2f})")
                         triggered_side = "NO"
                         triggered_token = no_token
                 elif yes_valid:
@@ -476,7 +530,7 @@ class EthNoTrendBot:
                     print(f"\n→ Only NO side valid, entering NO")
                     triggered_side = "NO"
                     triggered_token = no_token
-            
+
             # Dynamic order placement with re-evaluation
             if not self.active_trade and triggered_side:
                 print(f"\n🚀 ENTRY TRIGGERED: {triggered_side} - Starting dynamic order placement...")
@@ -507,30 +561,39 @@ class EthNoTrendBot:
                     current_ask = current_book['best_ask'] if current_book['best_ask'] else 999
                     current_ask_size = current_book['ask_size'] if current_book['ask_size'] else 0
                     
-                    # Validate entry criteria still met
-                    if current_bid < ENTRY_PRICE-0.02 or current_ask > 0.991:
-                        print(f"⚠️ Not tradeable. BID: ${current_bid:.2f}, ASK: ${current_ask:.2f}. Retrying in 1s...")
+                    # 🚨 ABORT CHECK during entry
+                    if current_ask > ABORT_ASK_PRICE:
+                        print(f"\n🚨 ABORT during entry: ASK ${current_ask:.2f} > ${ABORT_ASK_PRICE}")
+                        print(f"   ⏭️ Skipping market {slug}...\n")
+                        
+                        self.traded_markets.add(slug)
+                        return
+                    
+                    if current_bid < ENTRY_PRICE-0.02:
+                        print(f"⚠️ Not tradeable. Bid: ${current_bid:.2f}. Retrying in 1s...")
                         time.sleep(1)
                         continue
                     
                     if current_ask_size < POSITION_SIZE:
-                        print(f"⚠️ Insufficient liquidity: {current_ask_size} < {POSITION_SIZE}. Retrying in 1s...")
+                        print(f"⚠️ Insufficient liquidity: {current_ask_size}. Retrying in 1s...")
                         time.sleep(1)
                         continue
                     
-                    # Place FOK order at current ask
-                    print(f"   📋 Placing FOK: {POSITION_SIZE} shares @ ${current_ask:.2f} (Bid: ${current_bid:.2f})")
+
+                    POSITION_SIZE1 = POSITION_SIZE if triggered_side == "NO" else round(POSITION_SIZE * 0.5)
+                        
+                    print(f"   📋 Placing FOK: {POSITION_SIZE1} @ ${current_ask:.2f}")
                     
                     entry_start = time.time()
                     remaining_timeout = ENTRY_TIMEOUT - time_in_window
                     order_id, fill_price = self.place_order_with_validation(
-                        triggered_token, current_ask, POSITION_SIZE, BUY, 
+                        triggered_token, current_ask, POSITION_SIZE1, BUY, 
                         OrderType.FOK, start_time=entry_start, timeout=remaining_timeout
                     )
                     
                     # Handle timeout
                     if fill_price == "TIMEOUT":
-                        print(f"\n❌ Order placement timed out after {entry_attempt} attempts.")
+                        print(f"\n❌ Order timed out after {entry_attempt} attempts.")
                         self.traded_markets.add(slug)
                         return
                     
@@ -557,12 +620,12 @@ class EthNoTrendBot:
                         log_rec['entry1_Time'] = datetime.now().strftime("%H:%M:%S")
                         log_rec['entry_Side'] = triggered_side
                         log_rec['entry_Price'] = fill_price
-                        log_rec['position_size'] = POSITION_SIZE
+                        log_rec['position_size'] = POSITION_SIZE1
                         log_rec['status'] = 'SUCCESSFUL_ENTRY'
                         log_rec['notes'] = f'Filled on attempt {entry_attempt}'
                         
                         self.active_trade = True
-                        print(f"\n✅ Position Active: {POSITION_SIZE} {triggered_side} shares @ ${fill_price} (Attempt {entry_attempt})")
+                        print(f"\n✅ Position Active: {POSITION_SIZE1} {triggered_side} shares @ ${fill_price} (Attempt {entry_attempt})")
                         
                         self.manage_position(triggered_token, triggered_side, market_data, market_start_time, log_rec)
                         self.traded_markets.add(slug)
@@ -625,12 +688,12 @@ class EthNoTrendBot:
                         log_rec['sl_Time'] = datetime.now().strftime("%H:%M:%S")
                         log_rec['sl_Price'] = sl_price
                         log_rec['Final_Status'] = 'STOP_LOSS'
-                        log_rec['notes'] = f'{side_name} stop loss triggered at ${current_bid}, liquidated at ${sl_price}'
+                        log_rec['notes'] = f'{side_name} SL triggered, liquidated at ${sl_price}'
                         log_rec['is_SL_Triggered'] = 'YES'
                     else:
                         log_rec['Final_Status'] = 'STOP_LOSS_FAILED'
                         log_rec['is_SL_Triggered'] = 'YES'
-                        log_rec['notes'] = f'{side_name} stop loss triggered but liquidation failed'
+                        log_rec['notes'] = f'{side_name} SL triggered but liquidation failed'
                     
                     self.save_log(log_rec)
                     self.active_trade = False
@@ -696,11 +759,7 @@ class EthNoTrendBot:
                 
                 # Check HTTP status
                 if resp.status_code == 404:
-                    print(f"   ⚠️ 404 Error: Market '{slug}' not found on API")
-                    print(f"      This usually means:")
-                    print(f"      • Market hasn't been created yet (too early)")
-                    print(f"      • Wrong slug format")
-                    print(f"      • API indexing delay")
+                    print(f"   ⚠️ 404 Error: Market '{slug}' not found")
                     return None
                 
                 if resp.status_code != 200:
@@ -715,6 +774,8 @@ class EthNoTrendBot:
                 # Validate response structure
                 if not data or len(data) == 0:
                     print(f"   ⚠️ Empty response from API")
+                    print(f"   💤 Sleeping for 5 minutes before retrying...")
+                    time.sleep(300)
                     return None
                 
                 event = data[0]
@@ -802,6 +863,7 @@ class EthNoTrendBot:
                 
             except KeyboardInterrupt:
                 print("\n🛑 Bot stopped by user.")
+                dual_logger.close()
                 break
             except Exception as e:
                 print(f"\n❌ Unexpected error in main loop: {e}")
@@ -809,5 +871,10 @@ class EthNoTrendBot:
                 time.sleep(3)
 
 if __name__ == "__main__":
-
-    EthNoTrendBot().run()
+    try:
+        EthNoTrendBot().run()
+    except KeyboardInterrupt:
+        print("\n🛑 Bot stopped by user.")
+    finally:
+        dual_logger.close()
+        print(f"\n📝 Terminal log saved to: {LOG_FILENAME}")

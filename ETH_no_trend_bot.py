@@ -82,7 +82,7 @@ TRADE_SIDE = "BOTH"         # Options: "YES", "NO", or "BOTH"
 ENTRY_PRICE = 0.96          # Target entry price (bid must be >= this)
 STOP_LOSS_PRICE = 0.89      # Trigger for the sustained stop loss
 SUSTAIN_TIME = 3            # Seconds price must stay below SL to trigger
-POSITION_SIZE = 25          # Number of shares per trade
+POSITION_SIZE = 5          # Number of shares per trade
 MARKET_WINDOW = 240         # Only trade within the last 240 seconds
 POLLING_INTERVAL = 1        # Frequency of price checks (seconds)
 ENTRY_TIMEOUT = 210         # Max seconds to wait for entry order to fill
@@ -881,4 +881,5 @@ if __name__ == "__main__":
     finally:
         dual_logger.close()
         print(f"\n📝 Terminal log saved to: {LOG_FILENAME}")
+
 
